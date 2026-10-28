@@ -32,7 +32,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
-	if r.Method == http.MethodPost && (r.URL.Path == "/api/notes" || isConsumePath(r.URL.Path)) {
+	if r.Method == http.MethodPost && (r.URL.Path == "/api/notes" || isConsumePath(r.URL.Path) || isMaterialPath(r.URL.Path)) {
 		origins := r.Header.Values("Origin")
 		if len(origins) != 1 || origins[0] != s.origin {
 			writeError(w, http.StatusForbidden, "origin_forbidden")
@@ -53,9 +53,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		if r.URL.Path == "/api/notes" {
+		switch {
+		case r.URL.Path == "/api/notes":
 			s.create(w, r, body)
-		} else {
+		case isMaterialPath(r.URL.Path):
+			s.material(w, r, body)
+		default:
 			s.consume(w, r, body)
 		}
 		return
@@ -91,12 +94,50 @@ func isNotePath(path string) bool {
 	return part != path && part != "" && !strings.Contains(part, "/")
 }
 
-func isConsumePath(path string) bool {
-	if !strings.HasPrefix(path, "/api/notes/") || !strings.HasSuffix(path, "/consume") {
+func isConsumePath(path string) bool { return noteAction(path, "/consume") }
+
+func isMaterialPath(path string) bool { return noteAction(path, "/material") }
+
+func noteAction(path, suffix string) bool {
+	if !strings.HasPrefix(path, "/api/notes/") || !strings.HasSuffix(path, suffix) {
 		return false
 	}
-	id := strings.TrimSuffix(strings.TrimPrefix(path, "/api/notes/"), "/consume")
+	id := strings.TrimSuffix(strings.TrimPrefix(path, "/api/notes/"), suffix)
 	return id != "" && !strings.Contains(id, "/")
+}
+
+const shortAlphabet = "0123456789abcdefghjkmnpqrstvwxyz"
+
+func shortCode(raw string) ([]byte, bool) {
+	if len(raw) != 16 {
+		return nil, false
+	}
+	out := make([]byte, 16)
+	for i := 0; i < 16; i++ {
+		c := raw[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if !strings.ContainsRune(shortAlphabet, rune(c)) {
+			return nil, false
+		}
+		out[i] = c
+	}
+	return out, true
+}
+
+func lookupID(raw string) ([]byte, bool) {
+	if code, ok := shortCode(raw); ok {
+		return code, true
+	}
+	return decode(raw, 32)
+}
+
+func validLinkSecret(secret []byte) bool {
+	if len(secret) == 110 && secret[0] == 0x02 && secret[1] == 0x00 {
+		return true
+	}
+	return len(secret) == 154 && secret[0] == 0x02 && secret[1] == 0x01
 }
 
 func decode(s string, size int) ([]byte, bool) {
@@ -143,26 +184,57 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request, body []byte) {
 		Nonce         string `json:"nonce"`
 		TTL           int64  `json:"ttl"`
 		ReadTokenHash string `json:"read_token_hash"`
+		IDHash        string `json:"id_hash"`
+		LinkSecret    string `json:"link_secret"`
 	}
 	fields, ok := object(body)
-	if !ok || len(fields) != 4 || fields["ciphertext"] == nil || fields["nonce"] == nil || fields["ttl"] == nil || fields["read_token_hash"] == nil || json.Unmarshal(body, &input) != nil {
+	if !ok || len(fields) != 6 || fields["ciphertext"] == nil || fields["nonce"] == nil || fields["ttl"] == nil || fields["read_token_hash"] == nil || fields["id_hash"] == nil || fields["link_secret"] == nil || json.Unmarshal(body, &input) != nil {
 		writeError(w, http.StatusBadRequest, "invalid_note")
 		return
 	}
 	ciphertext, cOK := decode(input.Ciphertext, -1)
 	nonce, nOK := decode(input.Nonce, 12)
 	tokenHash, hOK := decode(input.ReadTokenHash, 32)
-	if !cOK || !nOK || !hOK || len(ciphertext) < 17 || len(ciphertext) > store.MaxCiphertext || !store.ValidTTL(input.TTL) {
+	idHash, iOK := decode(input.IDHash, 32)
+	linkSecret, sOK := decode(input.LinkSecret, -1)
+	if !cOK || !nOK || !hOK || !iOK || !sOK || !validLinkSecret(linkSecret) || len(ciphertext) < 17 || len(ciphertext) > store.MaxCiphertext || !store.ValidTTL(input.TTL) {
 		writeError(w, http.StatusBadRequest, "invalid_note")
 		return
 	}
-	id, err := s.store.Create(r.Context(), ciphertext, nonce, tokenHash, input.TTL)
+	err := s.store.CreateSealed(r.Context(), idHash, linkSecret, ciphertext, nonce, tokenHash, input.TTL)
 	if errors.Is(err, store.ErrCapacity) {
 		writeError(w, http.StatusServiceUnavailable, "capacity_exceeded")
+	} else if errors.Is(err, store.ErrInvalid) {
+		writeError(w, http.StatusBadRequest, "invalid_note")
 	} else if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error")
 	} else {
-		writeJSON(w, http.StatusCreated, map[string]string{"id": id})
+		writeJSON(w, http.StatusCreated, map[string]bool{"ok": true})
+	}
+}
+
+func (s *Server) material(w http.ResponseWriter, r *http.Request, body []byte) {
+	if !json.Valid(body) {
+		writeError(w, http.StatusBadRequest, "invalid_note")
+		return
+	}
+	fields, ok := object(body)
+	if !ok || len(fields) != 0 {
+		writeError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	code, ok := shortCode(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/notes/"), "/material"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	secret, err := s.store.Material(r.Context(), code)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found")
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error")
+	} else {
+		writeJSON(w, http.StatusOK, map[string]string{"link_secret": base64.RawURLEncoding.EncodeToString(secret)})
 	}
 }
 
@@ -180,7 +252,7 @@ func (s *Server) consume(w http.ResponseWriter, r *http.Request, body []byte) {
 	_ = json.Unmarshal(input["read_token"], &tokenString)
 	token, tokenOK := decode(tokenString, 32)
 	idString := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/notes/"), "/consume")
-	id, idOK := decode(idString, 32)
+	id, idOK := lookupID(idString)
 	if !tokenOK || !idOK {
 		writeError(w, http.StatusNotFound, "not_found")
 		return

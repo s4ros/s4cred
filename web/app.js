@@ -8,7 +8,7 @@
       noteLabel: "Your secret note", notePlaceholder: "Write something worth keeping private...", noteHelp: "Encrypted in your browser. Maximum 1,000,000 UTF-8 bytes.",
       expires: "Expires after", oneHour: "1 hour", oneDay: "24 hours", sevenDays: "7 days", protect: "Protect with a password", optional: "Optional extra protection",
       password: "Password", confirmPassword: "Confirm password", passwordHelp: "Choose a strong, unique password (12+ characters recommended). Share it separately; it cannot be recovered.",
-      createButton: "Create secret link", creating: "Encrypting and creating...", createdTitle: "Your link is ready.", createdLead: "Anyone with this link can attempt to open your note. Share it carefully.",
+      createButton: "Create secret link", creating: "Encrypting and creating...", createdTitle: "Your link is ready.", createdLead: "This short link is the whole secret. Anyone who can see it can try to open the note. Share it carefully.",
       linkLabel: "Single-use link", copy: "Copy", copied: "Copied to clipboard.", copyFailed: "Clipboard unavailable. Select the text and copy it manually.",
       sharePassword: "Send the password through a separate channel. It is not included in the link.", createAnother: "Create another note →",
       incoming: "A NOTE FOR YOU", readTitle: "Someone sent you\na secret.", readLead: "Take a moment before you open it.", warningTitle: "This note can only be read once.",
@@ -20,7 +20,7 @@
       wrongPassword: "Incorrect password. This attempt did not send a read request; you can try again.", notFound: "This note does not exist, has expired, or has already been read.",
       invalidNote: "The note could not be accepted. Check your input and try again.", capacity: "The service is at capacity. Please try again later.", origin: "This request was blocked by the service's origin policy.",
       internal: "The service could not complete the request. Please try again later.", createNetwork: "Could not confirm creation. A note may have been stored and will expire automatically; please try again.",
-      readNetwork: "The read could not be confirmed. The note may already have been deleted and cannot be recovered.", decryptError: "The note was retrieved but could not be decrypted. It has already been deleted and cannot be recovered.",
+      readNetwork: "The read could not be confirmed. The note may already have been deleted and cannot be recovered.", materialNetwork: "Could not load this link. The note was not opened or deleted; check the link and try again.", decryptError: "The note was retrieved but could not be decrypted. It has already been deleted and cannot be recovered.",
       linkChanged: "The link changed. Check it before confirming the read.", readChangedAfterRequest: "The link changed after a read was requested. The previous note may already have been deleted and cannot be recovered.",
       bytes: "bytes"
     },
@@ -30,7 +30,7 @@
       noteLabel: "Twoja tajna notatka", notePlaceholder: "Napisz coś, co ma pozostać prywatne...", noteHelp: "Szyfrowanie odbywa się w przeglądarce. Maksymalnie 1 000 000 bajtów UTF-8.",
       expires: "Wygasa po", oneHour: "1 godzinie", oneDay: "24 godzinach", sevenDays: "7 dniach", protect: "Zabezpiecz hasłem", optional: "Dodatkowa ochrona, opcjonalnie",
       password: "Hasło", confirmPassword: "Potwierdź hasło", passwordHelp: "Wybierz silne, unikalne hasło (zalecamy co najmniej 12 znaków). Przekaż je osobno; nie można go odzyskać.",
-      createButton: "Utwórz tajny link", creating: "Szyfrowanie i tworzenie...", createdTitle: "Twój link jest gotowy.", createdLead: "Każdy, kto ma ten link, może spróbować otworzyć notatkę. Udostępniaj go ostrożnie.",
+      createButton: "Utwórz tajny link", creating: "Szyfrowanie i tworzenie...", createdTitle: "Twój link jest gotowy.", createdLead: "Ten krótki link jest całym sekretem. Każdy, kto go zobaczy, może spróbować otworzyć notatkę. Udostępniaj go ostrożnie.",
       linkLabel: "Link jednorazowy", copy: "Kopiuj", copied: "Skopiowano do schowka.", copyFailed: "Schowek jest niedostępny. Zaznacz tekst i skopiuj go ręcznie.",
       sharePassword: "Przekaż hasło innym kanałem. Nie znajduje się ono w linku.", createAnother: "Utwórz kolejną notatkę →",
       incoming: "NOTATKA DLA CIEBIE", readTitle: "Ktoś przesłał Ci\nsekret.", readLead: "Zatrzymaj się na chwilę przed otwarciem.", warningTitle: "Tę notatkę można odczytać tylko raz.",
@@ -42,7 +42,7 @@
       wrongPassword: "Nieprawidłowe hasło. Ta próba nie wysłała żądania odczytu; możesz spróbować ponownie.", notFound: "Notatka nie istnieje, wygasła lub została już odczytana.",
       invalidNote: "Nie można przyjąć notatki. Sprawdź dane i spróbuj ponownie.", capacity: "Serwis osiągnął limit pojemności. Spróbuj ponownie później.", origin: "Żądanie zostało zablokowane przez politykę pochodzenia serwisu.",
       internal: "Serwis nie mógł wykonać żądania. Spróbuj ponownie później.", createNetwork: "Nie udało się potwierdzić utworzenia. Notatka mogła zostać zapisana i wygaśnie automatycznie; spróbuj ponownie.",
-      readNetwork: "Nie udało się potwierdzić odczytu. Notatka mogła już zostać usunięta i nie można jej odzyskać.", decryptError: "Pobrano notatkę, ale nie udało się jej odszyfrować. Została już usunięta i nie można jej odzyskać.",
+      readNetwork: "Nie udało się potwierdzić odczytu. Notatka mogła już zostać usunięta i nie można jej odzyskać.", materialNetwork: "Nie udało się wczytać linku. Notatka nie została otwarta ani usunięta; sprawdź link i spróbuj ponownie.", decryptError: "Pobrano notatkę, ale nie udało się jej odszyfrować. Została już usunięta i nie można jej odzyskać.",
       linkChanged: "Link się zmienił. Sprawdź go przed potwierdzeniem odczytu.", readChangedAfterRequest: "Link zmienił się po wysłaniu żądania odczytu. Poprzednia notatka mogła już zostać usunięta i nie można jej odzyskać.",
       bytes: "bajtów"
     }
@@ -71,6 +71,7 @@
   let readRevision = 0;
   let readAttempt = null;
   let readUncertain = false;
+  let pendingMaterial = Promise.resolve();
   const cryptoAvailable = !!(window.crypto && window.crypto.subtle && window.crypto.getRandomValues);
 
   function text(key) { return translations[language][key]; }
@@ -121,15 +122,61 @@
     const material = await crypto.subtle.importKey("raw", encoder.encode(password.normalize("NFC")), "PBKDF2", false, ["deriveKey"]);
     return crypto.subtle.deriveKey({ name: "PBKDF2", salt, iterations: 600000, hash: "SHA-256" }, material, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
   }
-  async function makeFragment(key, token, password) {
-    if (password === null) return `v1.${encode64(key)}.${encode64(token)}`;
+  const shortAlphabet = "0123456789abcdefghjkmnpqrstvwxyz";
+  function shortCode() {
+    const bytes = randomBytes(16);
+    let code = "";
+    for (let i = 0; i < bytes.length; i++) code += shortAlphabet[bytes[i] & 31];
+    return code;
+  }
+  function isShortCode(value) { return /^[0-9a-hjkmnp-tv-z]{16}$/.test(value); }
+  async function passwordPackage(key, token, password) {
     const salt = randomBytes(16);
     const nonce = randomBytes(12);
     const pair = new Uint8Array(64);
     pair.set(key);
     pair.set(token, 32);
     const wrapped = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, await passwordKey(password, salt), pair));
-    return `v1p.${encode64(salt)}.${encode64(nonce)}.${encode64(wrapped)}`;
+    const pack = new Uint8Array(108);
+    pack.set(salt);
+    pack.set(nonce, 16);
+    pack.set(wrapped, 28);
+    return pack;
+  }
+  async function sealKey(code, usage) {
+    return crypto.subtle.importKey("raw", encoder.encode(code), "HKDF", false, ["deriveKey"]).then((material) => crypto.subtle.deriveKey(
+      { name: "HKDF", hash: "SHA-256", salt: usage.salt, info: encoder.encode("s4cred-short-link-v1") },
+      material,
+      { name: "AES-GCM", length: 256 },
+      false,
+      [usage.op]
+    ));
+  }
+  async function sealPackage(code, plaintext) {
+    const salt = randomBytes(16);
+    const nonce = randomBytes(12);
+    const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, await sealKey(code, { salt, op: "encrypt" }), plaintext));
+    const flags = plaintext.length === 108 ? 1 : 0;
+    if (plaintext.length !== 64 && plaintext.length !== 108) throw new Error("Invalid package");
+    const blob = new Uint8Array(30 + sealed.length);
+    blob[0] = 2;
+    blob[1] = flags;
+    blob.set(salt, 2);
+    blob.set(nonce, 18);
+    blob.set(sealed, 30);
+    return blob;
+  }
+  async function unsealPackage(code, blob) {
+    if (blob.length !== 110 && blob.length !== 154 || blob[0] !== 2 || blob[1] !== 0 && blob[1] !== 1 || (blob[1] === 0 ? 110 : 154) !== blob.length) throw new Error("Invalid seal");
+    const salt = blob.slice(2, 18);
+    const nonce = blob.slice(18, 30);
+    const plain = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: nonce }, await sealKey(code, { salt, op: "decrypt" }), blob.slice(30)));
+    if (blob[1] === 0) {
+      if (plain.length !== 64) throw new Error("Invalid package");
+      return { version: "v1", key: plain.slice(0, 32), token: plain.slice(32) };
+    }
+    if (plain.length !== 108) throw new Error("Invalid package");
+    return { version: "v1p", salt: plain.slice(0, 16), nonce: plain.slice(16, 28), wrapped: plain.slice(28) };
   }
   function parseFragment(value) {
     const parts = value.split(".");
@@ -161,7 +208,7 @@
     render();
   }
   function refreshReadLink(changed) {
-    readRevision++;
+    const revision = ++readRevision;
     readLocation = location.href;
     fragment = null;
     noteID = null;
@@ -173,16 +220,44 @@
     setMessage($("note-copy-status"), null);
     setMessage($("read-error"), null);
     if (changed) setMessage($("read-interrupted"), readUncertain ? "readChangedAfterRequest" : "linkChanged");
+    $("read-button").disabled = readBusy || !cryptoAvailable;
+    const job = loadReadLink(revision);
+    pendingMaterial = job;
+    return job;
+  }
+  async function loadReadLink(revision) {
     try {
       const match = /^\/n\/([A-Za-z0-9_-]+)$/.exec(location.pathname);
       if (!match) throw new Error("Invalid path");
-      decode64(match[1], 32);
-      const parsed = parseFragment(location.hash.slice(1));
-      noteID = match[1];
+      const hash = location.hash.slice(1);
+      if (hash) {
+        decode64(match[1], 32);
+        const parsed = parseFragment(hash);
+        if (revision !== readRevision) return;
+        noteID = match[1];
+        fragment = parsed;
+        $("read-password-field").hidden = fragment.version !== "v1p";
+        return;
+      }
+      const code = match[1].toLowerCase();
+      if (!isShortCode(code)) throw new Error("Invalid path");
+      const data = await request(`/api/notes/${code}/material`, {});
+      if (revision !== readRevision) return;
+      const parsed = await unsealPackage(code, decode64(data.link_secret));
+      if (revision !== readRevision) return;
+      noteID = code;
       fragment = parsed;
       $("read-password-field").hidden = fragment.version !== "v1p";
-    } catch (_) { setMessage($("read-error"), "invalidLink"); }
-    $("read-button").disabled = readBusy || !fragment || !noteID || !cryptoAvailable;
+    } catch (error) {
+      if (revision !== readRevision) return;
+      fragment = null;
+      noteID = null;
+      if (error.messageKey) setMessage($("read-error"), error.messageKey);
+      else if (error.message === "network") setMessage($("read-error"), "materialNetwork");
+      else setMessage($("read-error"), "invalidLink");
+    } finally {
+      if (revision === readRevision) $("read-button").disabled = readBusy || !fragment || !noteID || !cryptoAvailable;
+    }
   }
 
   $("language").addEventListener("change", (event) => { language = event.target.value; savePreference("s4cred-language", language); render(); });
@@ -212,11 +287,16 @@
       const key = randomBytes(32), token = randomBytes(32), nonce = randomBytes(12);
       const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, await aesKey(key, "encrypt"), plaintext));
       const tokenHash = new Uint8Array(await crypto.subtle.digest("SHA-256", token));
-      const linkFragment = await makeFragment(key, token, password);
+      const code = shortCode();
+      const pair = new Uint8Array(64);
+      pair.set(key);
+      pair.set(token, 32);
+      const linkSecret = await sealPackage(code, password === null ? pair : await passwordPackage(key, token, password));
+      const idHash = new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(code)));
       requestStarted = true;
-      const result = await request("/api/notes", { ciphertext: encode64(ciphertext), nonce: encode64(nonce), ttl: Number($("ttl").value), read_token_hash: encode64(tokenHash) });
-      decode64(result.id, 32);
-      $("link").value = `${location.origin}/n/${result.id}#${linkFragment}`;
+      const result = await request("/api/notes", { ciphertext: encode64(ciphertext), nonce: encode64(nonce), ttl: Number($("ttl").value), read_token_hash: encode64(tokenHash), id_hash: encode64(idHash), link_secret: encode64(linkSecret) });
+      if (result.ok !== true) throw new Error("api");
+      $("link").value = `${location.origin}/n/${code}`;
       $("share-password").hidden = !protectedLink;
       $("note").value = "";
       $("create-password").value = "";
@@ -234,8 +314,15 @@
 
   $("read-form").addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (readLocation !== location.href) refreshReadLink(true);
-    if (readBusy || !fragment || !noteID) return;
+    if (readBusy) return;
+    setBusy("read", true);
+    try {
+      if (readLocation !== location.href) await refreshReadLink(true);
+      if (pendingMaterial) await pendingMaterial;
+    } finally {
+      if (!readAttempt) setBusy("read", false);
+    }
+    if (readBusy || readLocation !== location.href || !fragment || !noteID) return;
     setMessage($("read-error"), null);
     if (fragment.version === "v1p" && !$("read-password").value) return setMessage($("read-error"), "passwordRequired");
     const attempt = { href: location.href, revision: readRevision, fragment, noteID, sent: false };

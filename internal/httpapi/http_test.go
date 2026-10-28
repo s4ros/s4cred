@@ -57,31 +57,61 @@ func post(h http.Handler, path, body string) *httptest.ResponseRecorder {
 	return request(h, "POST", path, body, origin, "application/json")
 }
 
-func createBody(t *testing.T, ciphertext, nonce, token []byte, ttl int64) string {
+var codeSeq atomic.Int64
+
+func nextCode() string {
+	n := codeSeq.Add(1)
+	alphabet := []byte("0123456789abcdefghjkmnpqrstvwxyz")
+	out := bytes.Repeat([]byte{'0'}, 16)
+	for i := 15; i >= 0 && n > 0; i-- {
+		out[i] = alphabet[n%32]
+		n /= 32
+	}
+	return string(out)
+}
+
+func testSecret(flags byte) []byte {
+	n := 110
+	if flags == 1 {
+		n = 154
+	}
+	secret := bytes.Repeat([]byte{0x11}, n)
+	secret[0] = 0x02
+	secret[1] = flags
+	return secret
+}
+
+func createBodyFor(t *testing.T, code string, ciphertext, nonce, token []byte, ttl int64) string {
 	t.Helper()
 	hash := sha256.Sum256(token)
-	b, err := json.Marshal(map[string]any{"ciphertext": enc(ciphertext), "nonce": enc(nonce), "ttl": ttl, "read_token_hash": enc(hash[:])})
+	idHash := sha256.Sum256([]byte(code))
+	b, err := json.Marshal(map[string]any{
+		"ciphertext": enc(ciphertext), "nonce": enc(nonce), "ttl": ttl, "read_token_hash": enc(hash[:]),
+		"id_hash": enc(idHash[:]), "link_secret": enc(testSecret(0)),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return string(b)
 }
 
+func createBody(t *testing.T, ciphertext, nonce, token []byte, ttl int64) string {
+	t.Helper()
+	return createBodyFor(t, nextCode(), ciphertext, nonce, token, ttl)
+}
+
 func createNote(t *testing.T, h http.Handler, ciphertext, nonce, token []byte, ttl int64) string {
 	t.Helper()
-	w := post(h, "/api/notes", createBody(t, ciphertext, nonce, token, ttl))
+	code := nextCode()
+	w := post(h, "/api/notes", createBodyFor(t, code, ciphertext, nonce, token, ttl))
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create: %d %s", w.Code, w.Body.String())
 	}
-	var response map[string]string
-	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || len(response) != 1 {
+	var response map[string]bool
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || len(response) != 1 || !response["ok"] {
 		t.Fatalf("create response: %s, %v", w.Body.String(), err)
 	}
-	id, ok := decode(response["id"], 32)
-	if !ok || len(id) != 32 || len(response["id"]) != 43 {
-		t.Fatalf("invalid id: %s", response["id"])
-	}
-	return response["id"]
+	return code
 }
 
 func TestCreateConsumeAndMissingTokens(t *testing.T) {
@@ -154,7 +184,8 @@ func TestEntireBodyLimitAndTrailingValues(t *testing.T) {
 		return resp.StatusCode, string(response)
 	}
 	token := make([]byte, 32)
-	create := createBody(t, make([]byte, 17), make([]byte, 12), token, 3600)
+	code := nextCode()
+	create := createBodyFor(t, code, make([]byte, 17), make([]byte, 12), token, 3600)
 	for _, chunked := range []bool{false, true} {
 		for _, body := range []string{
 			create + strings.Repeat(" ", maxBody+1-len(create)),
@@ -170,12 +201,12 @@ func TestEntireBodyLimitAndTrailingValues(t *testing.T) {
 			}
 		}
 	}
-	code, response := send("/api/notes", create+strings.Repeat(" ", maxBody-len(create)), true)
-	var created map[string]string
-	if code != 201 || json.Unmarshal([]byte(response), &created) != nil {
-		t.Fatalf("exact limit create: %d %s", code, response)
+	status, response := send("/api/notes", create+strings.Repeat(" ", maxBody-len(create)), true)
+	var created map[string]bool
+	if status != 201 || json.Unmarshal([]byte(response), &created) != nil || !created["ok"] {
+		t.Fatalf("exact limit create: %d %s", status, response)
 	}
-	path := "/api/notes/" + created["id"] + "/consume"
+	path := "/api/notes/" + code + "/consume"
 	consume := `{"read_token":"` + enc(token) + `"}`
 	for _, chunked := range []bool{false, true} {
 		for _, body := range []string{
@@ -192,9 +223,9 @@ func TestEntireBodyLimitAndTrailingValues(t *testing.T) {
 			}
 		}
 	}
-	code, response = send(path, consume+strings.Repeat(" ", maxBody-len(consume)), true)
-	if code != 200 {
-		t.Fatalf("exact limit consume after rejected attempts: %d %s", code, response)
+	status, response = send(path, consume+strings.Repeat(" ", maxBody-len(consume)), true)
+	if status != 200 {
+		t.Fatalf("exact limit consume after rejected attempts: %d %s", status, response)
 	}
 }
 
@@ -452,4 +483,99 @@ func TestForbiddenConsumeDoesNotDelete(t *testing.T) {
 	if w = post(h, path, body); w.Code != 200 {
 		t.Fatalf("forbidden requests consumed note: %d", w.Code)
 	}
+}
+
+func TestShortLinkMaterialAndLegacyConsume(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "notes.db")
+	db, err := store.Open(path, 10, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	h := New(db, origin, fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("index")}})
+	ciphertext, nonce, token := bytes.Repeat([]byte{0xa1}, 17), bytes.Repeat([]byte{0xb2}, 12), bytes.Repeat([]byte{0xc3}, 32)
+	code := "k7hm2pqx9vjw4nrt"
+	body := createBodyFor(t, code, ciphertext, nonce, token, 3600)
+	var without map[string]any
+	if err := json.Unmarshal([]byte(body), &without); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"id_hash", "link_secret"} {
+		copy := mapsClone(without)
+		delete(copy, field)
+		encoded, _ := json.Marshal(copy)
+		if w := post(h, "/api/notes", string(encoded)); w.Code != 400 || !strings.Contains(w.Body.String(), "invalid_note") {
+			t.Fatalf("missing %s: %d %s", field, w.Code, w.Body.String())
+		}
+	}
+	badSecret := testSecret(0)
+	badSecret[0] = 0x01
+	bad := mapsClone(without)
+	bad["link_secret"] = enc(badSecret)
+	encoded, _ := json.Marshal(bad)
+	if w := post(h, "/api/notes", string(encoded)); w.Code != 400 {
+		t.Fatalf("bad seal: %d %s", w.Code, w.Body.String())
+	}
+	mismatch := mapsClone(without)
+	mismatch["link_secret"] = enc(testSecret(1)[:110])
+	encoded, _ = json.Marshal(mismatch)
+	if w := post(h, "/api/notes", string(encoded)); w.Code != 400 {
+		t.Fatalf("flag mismatch: %d %s", w.Code, w.Body.String())
+	}
+	if w := post(h, "/api/notes", body); w.Code != 201 || w.Body.String() != "{\"ok\":true}\n" || strings.Contains(w.Body.String(), code) {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+	if w := request(h, "GET", "/n/"+code, "", "", ""); w.Code != 200 || w.Body.String() != "index" {
+		t.Fatalf("GET note page: %d %s", w.Code, w.Body.String())
+	}
+	material := "/api/notes/" + strings.ToUpper(code) + "/material"
+	if w := request(h, "POST", material, `{}`, "", "application/json"); w.Code != 403 {
+		t.Fatalf("material origin: %d", w.Code)
+	}
+	if w := post(h, material, `{"extra":1}`); w.Code != 404 {
+		t.Fatalf("material body: %d %s", w.Code, w.Body.String())
+	}
+	if w := post(h, material, `{`); w.Code != 400 {
+		t.Fatalf("malformed material: %d %s", w.Code, w.Body.String())
+	}
+	secret := enc(testSecret(0))
+	for range 2 {
+		w := post(h, material, `{}`)
+		var got map[string]string
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &got) != nil || got["link_secret"] != secret {
+			t.Fatalf("material: %d %s", w.Code, w.Body.String())
+		}
+	}
+	if w := post(h, "/api/notes/iiiiiiiiiiiiiiii/material", `{}`); w.Code != 404 {
+		t.Fatalf("malformed code: %d", w.Code)
+	}
+	if w := post(h, "/api/notes/"+code+"/consume", `{"read_token":"`+enc(token)+`"}`); w.Code != 200 {
+		t.Fatalf("consume: %d %s", w.Code, w.Body.String())
+	}
+	if w := post(h, material, `{}`); w.Code != 404 || w.Body.String() != "{\"error\":\"not_found\"}\n" {
+		t.Fatalf("material after consume: %d %s", w.Code, w.Body.String())
+	}
+	legacyToken := bytes.Repeat([]byte{0x44}, 32)
+	legacyHash := sha256.Sum256(legacyToken)
+	legacyID, err := db.Create(context.Background(), ciphertext, nonce, legacyHash[:], 86400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := post(h, "/api/notes/"+legacyID+"/material", `{}`); w.Code != 404 {
+		t.Fatalf("legacy material: %d", w.Code)
+	}
+	if w := post(h, "/api/notes/"+legacyID+"/consume", `{"read_token":"`+enc(legacyToken)+`"}`); w.Code != 200 {
+		t.Fatalf("legacy consume: %d %s", w.Code, w.Body.String())
+	}
+	if w := post(h, "/api/notes/"+legacyID+"/consume", `{"read_token":"`+enc(legacyToken)+`"}`); w.Code != 404 {
+		t.Fatalf("second legacy consume: %d", w.Code)
+	}
+}
+
+func mapsClone(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }

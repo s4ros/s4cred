@@ -70,9 +70,20 @@ func open(path string, maxNotes, maxBytes int64, timeout time.Duration) (*Store,
 			read_token_hash BLOB NOT NULL,
 			ciphertext BLOB NOT NULL,
 			nonce BLOB NOT NULL,
-			expires_at INTEGER NOT NULL
+			expires_at INTEGER NOT NULL,
+			link_secret BLOB
 		);
 		CREATE INDEX IF NOT EXISTS notes_expiration ON notes(expires_at);`)
+		if err != nil {
+			return err
+		}
+		var has int
+		if err = db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('notes') WHERE name = 'link_secret'`).Scan(&has); err != nil {
+			return err
+		}
+		if has == 0 {
+			_, err = db.ExecContext(ctx, `ALTER TABLE notes ADD COLUMN link_secret BLOB`)
+		}
 		return err
 	})
 	if err != nil {
@@ -164,35 +175,85 @@ func (s *Store) Create(ctx context.Context, ciphertext, nonce, tokenHash []byte,
 		return "", err
 	}
 	idHash := sha256.Sum256(id[:])
-	tx, err := s.begin(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer tx.close()
-	now := s.now()
-	var count, bytes int64
-	if err := tx.QueryRowContext(ctx, `SELECT count(*), coalesce(sum(length(ciphertext)), 0) FROM notes WHERE expires_at > ?`, now.UnixNano()).Scan(&count, &bytes); err != nil {
-		return "", err
-	}
-	if count >= s.maxNotes || int64(len(ciphertext)) > s.maxBytes || bytes > s.maxBytes-int64(len(ciphertext)) {
-		return "", ErrCapacity
-	}
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO notes (id_hash, read_token_hash, ciphertext, nonce, expires_at) VALUES (?, ?, ?, ?, ?)`, idHash[:], tokenHash, ciphertext, nonce, now.Add(time.Duration(ttl)*time.Second).UnixNano())
-	if err != nil {
-		return "", err
-	}
-	if err := tx.commit(ctx); err != nil {
+	if err := s.insert(ctx, idHash[:], tokenHash, ciphertext, nonce, nil, ttl); err != nil {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(id[:]), nil
 }
 
+func validLinkSecret(secret []byte) bool {
+	if len(secret) == 110 && secret[0] == 0x02 && secret[1] == 0x00 {
+		return true
+	}
+	return len(secret) == 154 && secret[0] == 0x02 && secret[1] == 0x01
+}
+
+// CreateSealed stores a note under a caller-supplied identifier hash.
+// linkSecret is an opaque sealed package; the raw short code is not stored.
+func (s *Store) CreateSealed(ctx context.Context, idHash, linkSecret, ciphertext, nonce, tokenHash []byte, ttl int64) error {
+	if len(idHash) != 32 || !validLinkSecret(linkSecret) || len(ciphertext) < 17 || len(ciphertext) > MaxCiphertext || len(nonce) != 12 || len(tokenHash) != 32 || !ValidTTL(ttl) {
+		return ErrInvalid
+	}
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	return s.insert(ctx, idHash, tokenHash, ciphertext, nonce, linkSecret, ttl)
+}
+
+func (s *Store) insert(ctx context.Context, idHash, tokenHash, ciphertext, nonce, linkSecret []byte, ttl int64) error {
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.close()
+	now := s.now()
+	var count, bytes int64
+	if err := tx.QueryRowContext(ctx, `SELECT count(*), coalesce(sum(length(ciphertext)), 0) FROM notes WHERE expires_at > ?`, now.UnixNano()).Scan(&count, &bytes); err != nil {
+		return err
+	}
+	if count >= s.maxNotes || int64(len(ciphertext)) > s.maxBytes || bytes > s.maxBytes-int64(len(ciphertext)) {
+		return ErrCapacity
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO notes (id_hash, read_token_hash, ciphertext, nonce, expires_at, link_secret) VALUES (?, ?, ?, ?, ?, ?)`, idHash, tokenHash, ciphertext, nonce, now.Add(time.Duration(ttl)*time.Second).UnixNano(), linkSecret)
+	if err != nil {
+		var sqliteErr *sqlite.Error
+		if errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == 19 { // SQLITE_CONSTRAINT
+			return ErrInvalid
+		}
+		return err
+	}
+	return tx.commit(ctx)
+}
+
+// Material returns the sealed package for a short code without deleting the note.
+func (s *Store) Material(ctx context.Context, code []byte) ([]byte, error) {
+	if len(code) != 16 {
+		return nil, ErrNotFound
+	}
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	idHash := sha256.Sum256(code)
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.close()
+	var secret []byte
+	err = tx.QueryRowContext(ctx, `SELECT link_secret FROM notes WHERE id_hash = ? AND expires_at > ? AND link_secret IS NOT NULL`, idHash[:], s.now().UnixNano()).Scan(&secret)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(nil), secret...), nil
+}
+
 // Consume verifies and deletes a note in one transaction before returning it.
 func (s *Store) Consume(ctx context.Context, id, token []byte) ([]byte, []byte, error) {
-	if len(id) != 32 || len(token) != 32 {
+	if (len(id) != 32 && len(id) != 16) || len(token) != 32 {
 		return nil, nil, ErrNotFound
 	}
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)

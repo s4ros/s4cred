@@ -98,6 +98,132 @@ func TestExpirationCleanupAndCapacity(t *testing.T) {
 	}
 }
 
+func sealedBlob(flags byte) []byte {
+	n := 110
+	if flags == 1 {
+		n = 154
+	}
+	blob := bytes.Repeat([]byte{0xab}, n)
+	blob[0] = 0x02
+	blob[1] = flags
+	return blob
+}
+
+func TestCreateSealedHidesCodeAndMaterialDoesNotConsume(t *testing.T) {
+	s := newStore(t, 10, 1000)
+	now := time.Unix(1_700_000_000, 0)
+	s.now = func() time.Time { return now }
+	code := []byte("0123456789abcdef")
+	idHash := sha256.Sum256(code)
+	token := bytes.Repeat([]byte{0x55}, 32)
+	tokenHash := sha256.Sum256(token)
+	blob := sealedBlob(0)
+	ciphertext, nonce := bytes.Repeat([]byte{0x71}, 17), bytes.Repeat([]byte{0x34}, 12)
+	if err := s.CreateSealed(context.Background(), idHash[:], blob, ciphertext, nonce, tokenHash[:], 3600); err != nil {
+		t.Fatal(err)
+	}
+	var storedID, storedToken, storedCipher, storedNonce, storedSecret []byte
+	if err := s.db.QueryRow(`SELECT id_hash, read_token_hash, ciphertext, nonce, link_secret FROM notes`).Scan(&storedID, &storedToken, &storedCipher, &storedNonce, &storedSecret); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(storedID, idHash[:]) || !bytes.Equal(storedSecret, blob) || bytes.Contains(storedID, code) || bytes.Contains(storedSecret, code) || bytes.Contains(storedCipher, code) || bytes.Contains(storedNonce, code) || bytes.Contains(storedToken, code) {
+		t.Fatal("stored row exposed the raw short code or did not keep the sealed blob")
+	}
+	got, err := s.Material(context.Background(), code)
+	if err != nil || !bytes.Equal(got, blob) {
+		t.Fatalf("material: %v", err)
+	}
+	if _, err = s.Material(context.Background(), code); err != nil {
+		t.Fatalf("second material consumed the note: %v", err)
+	}
+	if _, _, err = s.Consume(context.Background(), code, token); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Material(context.Background(), code); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("material after consume: %v", err)
+	}
+	if err := s.CreateSealed(context.Background(), idHash[:], blob, ciphertext, nonce, tokenHash[:], 86400); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(25 * time.Hour)
+	if _, err = s.Material(context.Background(), code); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired material: %v", err)
+	}
+	legacyToken := bytes.Repeat([]byte{0x66}, 32)
+	legacyID := idBytes(t, create(t, s, legacyToken, 17, 3600))
+	if _, err = s.Material(context.Background(), code); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("legacy material: %v", err)
+	}
+	if _, _, err = s.Consume(context.Background(), legacyID, legacyToken); err != nil {
+		t.Fatalf("legacy consume: %v", err)
+	}
+	if _, err = s.Material(context.Background(), []byte("short")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("short material id: %v", err)
+	}
+	if err := s.CreateSealed(context.Background(), idHash[:], blob, ciphertext, nonce, tokenHash[:], 3600); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("duplicate sealed id: %v", err)
+	}
+}
+
+func TestCreateSealedValidationAndMigration(t *testing.T) {
+	s := newStore(t, 1, 17)
+	code := []byte("0123456789abcdef")
+	idHash := sha256.Sum256(code)
+	tokenHash := bytes.Repeat([]byte{3}, 32)
+	blob := sealedBlob(0)
+	ciphertext, nonce := bytes.Repeat([]byte{0x71}, 17), bytes.Repeat([]byte{0x34}, 12)
+	if err := s.CreateSealed(context.Background(), idHash[:], blob, ciphertext, nonce, tokenHash, 3600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSealed(context.Background(), bytes.Repeat([]byte{9}, 32), blob, ciphertext, nonce, tokenHash, 3600); !errors.Is(err, ErrCapacity) {
+		t.Fatalf("sealed capacity: %v", err)
+	}
+	bad := []struct {
+		id, secret, ct, nonce, hash []byte
+		ttl                         int64
+	}{
+		{idHash[:31], blob, ciphertext, nonce, tokenHash, 3600},
+		{idHash[:], sealedBlob(1)[:110], ciphertext, nonce, tokenHash, 3600},
+		{idHash[:], append([]byte{0x01, 0x00}, blob[2:]...), ciphertext, nonce, tokenHash, 3600},
+		{idHash[:], blob, ciphertext[:16], nonce, tokenHash, 3600},
+		{idHash[:], blob, ciphertext, nonce, tokenHash, 1},
+	}
+	for _, tc := range bad {
+		if err := s.CreateSealed(context.Background(), tc.id, tc.secret, tc.ct, tc.nonce, tc.hash, tc.ttl); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("invalid sealed note: %v", err)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE notes (
+		id_hash BLOB PRIMARY KEY NOT NULL,
+		read_token_hash BLOB NOT NULL,
+		ciphertext BLOB NOT NULL,
+		nonce BLOB NOT NULL,
+		expires_at INTEGER NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := Open(path, 10, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrated.Close()
+	var has int
+	if err := migrated.db.QueryRow(`SELECT count(*) FROM pragma_table_info('notes') WHERE name = 'link_secret'`).Scan(&has); err != nil || has != 1 {
+		t.Fatalf("migrated column: %d, %v", has, err)
+	}
+	if err := migrated.CreateSealed(context.Background(), idHash[:], blob, ciphertext, nonce, tokenHash, 3600); err != nil {
+		t.Fatalf("create after migration: %v", err)
+	}
+}
+
 func TestByteCapacityAndValidation(t *testing.T) {
 	s := newStore(t, 10, 34)
 	token := make([]byte, 32)

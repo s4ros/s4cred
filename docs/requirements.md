@@ -1,6 +1,6 @@
 # s4cred — Requirements and Application Design
 
-**Status:** Released as version 1.0.0. Product requirements are agreed and implemented.
+**Status:** Released as version 1.1.0. New notes use short links. Unread version 1.0.0 links remain readable.
 
 ## 1. Goal
 
@@ -9,7 +9,7 @@ s4cred is a small web application for sharing confidential notes via single-use 
 ## 2. Agreed Requirements
 
 - The application is public and does not require accounts or login.
-- Note contents are encrypted in the browser before being sent to the server; the key is not sent to the server.
+- Note contents are encrypted in the browser before being sent to the server. The server receives a sealed package, not the unsealed key. The raw short code is not sent when the note is created.
 - The sender chooses how long the note remains valid.
 - Notes may expire after 1 hour, 24 hours, or 7 days; the default is 24 hours.
 - The maximum note size is 1 MB, defined as 1,000,000 bytes of UTF-8 text.
@@ -45,8 +45,8 @@ The note limit is measured in UTF-8 bytes, not characters. AES-GCM adds a 16-byt
 1. The sender opens the home page, enters text, and selects the expiration period. Optionally, they select the **Protect with a password** checkbox, enter a password, and confirm it in a second field.
 2. The interface explains the single-use read, expiration, and size limit. Empty notes and text exceeding the limit are rejected.
 3. The browser independently generates a random encryption key, nonce, and read token, then encrypts the text locally. If a password was selected, the browser protects both the note key and read token with the password as described in section 7.1.
-4. Only the encrypted data, nonce, selected lifetime, and SHA-256 hash of the read token are sent to the server. The server generates a random identifier and stores the data in SQLite.
-5. The browser creates a link containing the identifier and either the key and read token or their password-protected form, and offers a copy button. The application does not send the link or password to third parties. If a password is used, the interface reminds the sender to share it through a separate channel.
+4. The browser generates a 16-character code and seals the note key and read token under a key derived from that code. It sends the encrypted note, nonce, selected lifetime, SHA-256 hash of the read token, SHA-256 hash of the code, and the sealed package. It does not send the raw code. The server stores the hash and the sealed package in SQLite.
+5. The browser creates a link containing only the code, with no fragment, and offers a copy button. The application does not send the link or password to third parties. If a password is used, the interface reminds the sender to share it through a separate channel. The short link is the whole bearer secret.
 6. After success, the form clears the text and password fields; the sender can create another note. An empty password or one that does not match its confirmation is rejected.
 
 If sending fails, the application displays an error and does not claim that the note was created. If the response is lost after storage, an unclaimed note may remain until its selected expiration.
@@ -54,7 +54,7 @@ If sending fails, the application displays an error and does not claim that the 
 ### 4.2. Reading a Note
 
 1. The recipient opens the link. Loading the page does not fetch or delete the note; this reduces consumption by link previews and scanners.
-2. The interface warns that confirming will delete the note and it cannot be recovered. A missing or invalid link fragment is detected before sending the read request.
+2. The interface warns that confirming will delete the note and it cannot be recovered. A missing or invalid link is detected before sending the read request. A short link loads its sealed package with a separate request that does not delete the note. A version 1.0.0 fragment is still read locally and is not fetched from the server.
 3. If the link is password-protected, the recipient enters the password. The browser checks it locally by decrypting the key and read token before sending the read request. An incorrect password neither reads nor consumes the note, and the user may retry.
 4. After confirmation, the browser sends the read token in the request body. The server verifies it, atomically checks validity, deletes the record, and returns the ciphertext to at most one authorized request.
 5. The browser decrypts the contents locally and displays them as text, not HTML. A copy button allows the recipient to copy the contents to their device clipboard.
@@ -102,13 +102,14 @@ The repository will include separate, clearly documented examples for Nginx, Tra
 
 ### 6.2. Note Record
 
-- SHA-256 hash of a random identifier with at least 256 bits of entropy.
+- SHA-256 hash of the identifier. Version 1.0.0 identifiers are 32 raw bytes. Version 1.1.0 identifiers are the UTF-8 bytes of a 16-character lowercase code. The raw code is not stored.
 - SHA-256 hash of the independently generated 256-bit read token, stored as a 32-byte SQLite BLOB.
 - Ciphertext including the AES-GCM authentication tag, stored as a SQLite BLOB rather than base64 text.
 - Random 96-bit nonce, stored as a SQLite BLOB.
 - Expiration timestamp.
+- For short links only, `link_secret`: the sealed key package described in section 7.1. Version 1.0.0 rows leave it NULL. It is not counted toward the ciphertext quota.
 
-The database does not store plaintext, passwords, encryption keys, raw read tokens, password-protected keys or tokens, or complete links. The server hashes the identifier received in a request for lookup; it does not need to store the original identifier persistently.
+The database does not store plaintext, passwords, unsealed encryption keys, raw read tokens, raw short codes, or complete links. Short-link rows store the sealed package from section 7.1. The server hashes the identifier received in a request for lookup; it does not need to store the original identifier persistently.
 
 ### 6.3. Single-Use Semantics
 
@@ -120,8 +121,9 @@ The read uses a SQLite write transaction: prevent concurrent writes, obtain the 
 | --- | --- | --- |
 | `GET /` | Note creation interface | HTML; does not change data |
 | `GET /n/{id}` | Note reading interface | HTML; does not fetch or delete the note |
-| `POST /api/notes` | Validates and stores `ciphertext`, `nonce`, `ttl`, and `read_token_hash` | `201` with random `id`; data, capacity, or availability errors |
-| `POST /api/notes/{id}/consume` | Validates `read_token` and atomically deletes and returns a valid note | `200` with `ciphertext` and `nonce`, or a general `404` |
+| `POST /api/notes` | Validates and stores `ciphertext`, `nonce`, `ttl`, `read_token_hash`, `id_hash`, and `link_secret` | `201` with `{"ok": true}`; data, capacity, or availability errors. The response does not contain the code |
+| `POST /api/notes/{code}/material` | Returns the sealed package for a live short link. Does not delete | `200` with `link_secret`, or a general `404` |
+| `POST /api/notes/{id}/consume` | Validates `read_token` and atomically deletes and returns a valid note. `{id}` may be a short code or a legacy 32-byte identifier | `200` with `ciphertext` and `nonce`, or a general `404` |
 
 Binary JSON values use unpadded base64url. `read_token_hash` is the SHA-256 digest of the 32 raw read-token bytes; both the decoded digest and decoded `read_token` must be exactly 32 bytes. The raw read token is sent only in the JSON body of a confirmed consume request, never in the URL; it is not persistently stored or logged. A syntactically valid consume request with a missing, invalid, or incorrect token receives the same general `404` as a missing, expired, or consumed note; malformed JSON may receive `400`.
 
@@ -133,14 +135,17 @@ For a 1,000,000-byte note, the AES-GCM ciphertext is 1,000,016 bytes, before bas
 
 - Encryption uses AES-256-GCM: a new 256-bit key and 96-bit nonce for every note, generated cryptographically in the browser.
 - The browser independently generates a 256-bit read token for every note using a cryptographically secure random generator. The SHA-256 hash sent on creation is a verifier, not the read token or a password hash. Only the raw token authorizes a consume request; the server receives it at that point but never stores or logs it.
-- Without a password, the note key and read token are in the URL fragment after `#`, which the browser does not send in HTTP requests.
-- With a password, the browser generates a separate random salt and nonce; derives a wrapping key from the password using PBKDF2-HMAC-SHA-256; and encrypts the concatenation of the 32-byte note key and 32-byte read token using AES-256-GCM. The link fragment contains the format version, salt, nonce, and encrypted key-and-token package, but not the password. The password is Unicode NFC-normalized and encoded as UTF-8; it is not trimmed or case-folded.
-- The fragment format is `#v1.<key>.<read-token>` without a password or `#v1p.<salt>.<nonce>.<encrypted-key-and-token>` with a password; binary values are unpadded base64url encoded. The encrypted package is 80 bytes, including the AES-GCM tag. KDF parameters are bound to the format version so existing links remain readable after future changes.
+- New links use a 16-character Crockford base32 code (`0123456789abcdefghjkmnpqrstvwxyz`, case-insensitive). The shared URL is `/n/{code}` and has no fragment. The code is 80 bits and is the whole bearer secret for an unprotected note.
+- The browser seals the note key and read token with HKDF-SHA-256 and AES-256-GCM before upload. HKDF inputs are the UTF-8 code, a random 16-byte salt, and the ASCII info `s4cred-short-link-v1`. The stored blob is `0x02 || flags || salt(16) || nonce(12) || ciphertext-and-tag`. Flags `0x00` seals the raw 64-byte key and token (110 bytes total). Flags `0x01` seals the password package below (154 bytes total). The server stores this blob and SHA-256 of the lowercase code. It never stores or unseals the code.
+- Opening a short link sends the code to the server in the material and consume paths. A logged `GET /n/{code}` is therefore enough to open an unprotected note. Path and `Referer` logging must stay disabled at every layer. A database leak without the code does not reveal the key.
+- Version 1.0.0 links remain valid. Without a password, their note key and read token are in the URL fragment after `#`, which the browser does not send in HTTP requests. Those links do not use the material endpoint.
+- With a password, the browser generates a separate random salt and nonce; derives a wrapping key from the password using PBKDF2-HMAC-SHA-256; and encrypts the concatenation of the 32-byte note key and 32-byte read token using AES-256-GCM. That package is what the short-link seal wraps. The password is Unicode NFC-normalized and encoded as UTF-8; it is not trimmed or case-folded. It is not part of the link.
+- Version 1.0.0 fragment format remains `#v1.<key>.<read-token>` without a password or `#v1p.<salt>.<nonce>.<encrypted-key-and-token>` with a password; binary values are unpadded base64url encoded. The encrypted package is 80 bytes, including the AES-GCM tag. KDF parameters are bound to the format version so existing links remain readable after future changes.
 - Password verification locally decrypts the key and read token. An incorrect password does not send a read request. Neither the password nor its hash is sent to or stored by the server; the application also does not store it in `localStorage` or `sessionStorage`. Forgotten passwords cannot be recovered.
 - The identifier is in the path and can appear in infrastructure logs; path and `Referer` logging must be disabled for the application at every layer.
 - The link is secret. Without a password, anyone with the complete link can open the note; with a password, the correct password is also needed. A link can appear in browser history, the clipboard, a messaging service, or a screenshot.
-- A password limits the impact of a link leak, but anyone with the link can attempt to guess it offline. Request rate limits cannot stop such attempts, so a strong, unique password matters. Knowing only the identifier does not authorize consumption; anyone who obtains the raw read token can nevertheless consume the note, even without its decryption key.
-- The server and infrastructure administrator do not receive the key during the normal protocol, but they control the JavaScript delivered to the browser. A malicious or compromised application can capture the contents or key. This design does not protect against such a server, malicious extensions, or a compromised device.
+- A password limits the impact of a link leak, but anyone with the link can attempt to guess it offline. Request rate limits cannot stop such attempts, so a strong, unique password matters. For a short link, the code is enough to fetch the sealed package and consume the note. For a version 1.0.0 link, the path identifier alone is not enough; the fragment is also required. Anyone who obtains the raw read token can consume the note even without its decryption key.
+- The operator controls the JavaScript delivered to the browser. A malicious or compromised application can capture the contents or key, including by unsealing a short link when the recipient opens it. This design does not protect against such a server, malicious extensions, or a compromised device. An honest server does not unseal the package and does not store the raw code.
 - HTTPS must be configured correctly up to the trusted termination point; the connection from proxy to application should stay on a trusted network or also be encrypted.
 
 ### 7.2. Application Protection
@@ -172,7 +177,7 @@ For a 1,000,000-byte note, the AES-GCM ciphertext is 1,000,016 bytes, before bas
 ## 9. Acceptance Criteria
 
 1. A user can create a note for each allowed expiration period, with or without an additional password, and receive a working link.
-2. The server, database, and logs do not contain plaintext, passwords, or encryption keys. The complete link is not sent to the server. The raw read token is sent only in a confirmed consume request, never persistently stored or logged, and only its hash is retained in the database before consumption.
+2. The server, database, and logs do not contain plaintext, passwords, or unsealed encryption keys. Creating a note does not send the raw short code. The recipient's material and consume requests do send it; it is not stored. The raw read token is sent only in a confirmed consume request, never persistently stored or logged, and only its hash is retained in the database before consumption.
 3. Opening the link, even repeatedly, does not consume the note; a confirmed read deletes it from the database.
 4. Under concurrent reads, exactly one recipient receives the ciphertext; subsequent attempts receive a general unavailable message.
 5. An expired note cannot be read, and cleanup deletes it after startup or while the application is running.
@@ -186,3 +191,4 @@ For a 1,000,000-byte note, the AES-GCM ciphertext is 1,000,016 bytes, before bas
 13. The backend is written in Go and the container runs the Go application binary without requiring a Python runtime.
 14. The repository contains independently usable, documented Nginx, Traefik, and Caddy examples, with limitations and equivalent security requirements made explicit for each.
 15. Missing, malformed, or incorrect read tokens in syntactically valid requests cannot consume a note and return the same general response as a missing or expired note; a subsequent request with the correct token can consume it exactly once.
+16. A new note yields a 16-character code and no fragment. The database row stores the sealed package and the code's hash, not the raw code. `GET /n/{code}` and material retrieval do not consume the note. Confirming consumes it once. A version 1.0.0 fragment link still opens. A wrong password on a short link sends no consume request.

@@ -41,6 +41,39 @@ const harness = String.raw`
     const binary = atob(value.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - value.length % 4) % 4));
     return Uint8Array.from(binary, (character) => character.charCodeAt(0));
   }
+  function encode64(bytes) {
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 32768) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 32768));
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  async function unseal(code, blob) {
+    const salt = blob.slice(2, 18), nonce = blob.slice(18, 30);
+    const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(code), 'HKDF', false, ['deriveKey']);
+    const key = await crypto.subtle.deriveKey({ name:'HKDF', hash:'SHA-256', salt, info: new TextEncoder().encode('s4cred-short-link-v1') }, material, { name:'AES-GCM', length:256 }, false, ['decrypt']);
+    return new Uint8Array(await crypto.subtle.decrypt({ name:'AES-GCM', iv:nonce }, key, blob.slice(30)));
+  }
+  async function seedLegacy(plaintext, password) {
+    const key = crypto.getRandomValues(new Uint8Array(32));
+    const token = crypto.getRandomValues(new Uint8Array(32));
+    const nonce = crypto.getRandomValues(new Uint8Array(12));
+    const aes = await crypto.subtle.importKey('raw', key, { name:'AES-GCM' }, false, ['encrypt']);
+    const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name:'AES-GCM', iv:nonce }, aes, new TextEncoder().encode(plaintext)));
+    const tokenHash = new Uint8Array(await crypto.subtle.digest('SHA-256', token));
+    const id = encode64(crypto.getRandomValues(new Uint8Array(32)));
+    await fetch('/test/legacy', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ id, ciphertext: encode64(ciphertext), nonce: encode64(nonce), read_token_hash: encode64(tokenHash) }) });
+    let fragment = 'v1.' + encode64(key) + '.' + encode64(token);
+    if (password !== undefined) {
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      const wrapNonce = crypto.getRandomValues(new Uint8Array(12));
+      const pair = new Uint8Array(64);
+      pair.set(key); pair.set(token, 32);
+      const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(password.normalize('NFC')), 'PBKDF2', false, ['deriveKey']);
+      const wrapping = await crypto.subtle.deriveKey({ name:'PBKDF2', salt, iterations:600000, hash:'SHA-256' }, material, { name:'AES-GCM', length:256 }, false, ['encrypt']);
+      const wrapped = new Uint8Array(await crypto.subtle.encrypt({ name:'AES-GCM', iv:wrapNonce }, wrapping, pair));
+      fragment = 'v1p.' + encode64(salt) + '.' + encode64(wrapNonce) + '.' + encode64(wrapped);
+    }
+    return location.origin + '/n/' + id + '#' + fragment;
+  }
   async function create(doc, note, password) {
     fill(doc, 'note', note);
     if (password !== undefined) {
@@ -91,8 +124,7 @@ const harness = String.raw`
     const secret = 'Hello 🌍 <img src=x onerror="window.injected=true">\nżółć';
     el(doc, 'ttl').value = '3600';
     const link = await create(doc, secret);
-    const plainParts = new URL(link).hash.slice(1).split('.');
-    assert(plainParts[0] === 'v1' && plainParts.length === 3, 'plain fragment format');
+    assert(/^https?:\/\/[^/]+\/n\/[0-9a-hjkmnp-tv-z]{16}$/.test(link) && !link.includes('#'), 'short link format');
     assert(el(doc, 'note').value === '', 'note cleared');
     Object.defineProperty(frame.contentWindow.navigator, 'clipboard', { value: undefined, configurable: true });
     click(doc, 'copy-link');
@@ -100,13 +132,21 @@ const harness = String.raw`
     assert(el(doc, 'link').selectionStart === 0 && el(doc, 'link').selectionEnd === link.length, 'manual copy selects link');
     let state = await stats();
     const created = state.calls[state.calls.length - 1];
-    assert(created.body.ttl === 3600 && Object.keys(created.body).sort().join(',') === 'ciphertext,nonce,read_token_hash,ttl', 'creation request contract');
-    assert(!JSON.stringify(created.body).includes(secret) && !JSON.stringify(created.body).includes(plainParts[1]) && !JSON.stringify(created.body).includes(plainParts[2]), 'no plaintext, key, or raw token on creation');
+    assert(created.body.ttl === 3600 && Object.keys(created.body).sort().join(',') === 'ciphertext,id_hash,link_secret,nonce,read_token_hash,ttl', 'creation request contract');
+    const sealed = decode64(created.body.link_secret);
+    const code = new URL(link).pathname.slice(3);
+    const openedSecret = await unseal(code, sealed);
+    const wrongCode = code.slice(0, 15) + (code[15] === '0' ? '1' : '0');
+    let wrongRejected = false;
+    try { await unseal(wrongCode, sealed); } catch (_) { wrongRejected = true; }
+    assert(wrongRejected && openedSecret.length === 64, 'sealed package opens only with the short code');
+    assert(!JSON.stringify(created.body).includes(secret) && !JSON.stringify(created.body).includes(encode64(openedSecret.slice(0, 32))) && !JSON.stringify(created.body).includes(encode64(openedSecret.slice(32))), 'no plaintext, key, or raw token on creation');
     const before = state.consumes;
+    const beforeMaterial = state.materials;
     doc = await open(link);
     doc = await open(link);
     state = await stats();
-    assert(state.consumes === before, 'opening and reloading do not consume');
+    assert(state.consumes === before && state.materials === beforeMaterial + 2, 'opening and reloading do not consume');
     click(doc, 'read-button');
     await waitFor(() => !el(doc, 'opened').hidden || !el(doc, 'read-error').hidden, 'read plain');
     assert(!el(doc, 'opened').hidden && el(doc, 'opened-note').textContent === secret, 'plaintext round trip');
@@ -117,7 +157,7 @@ const harness = String.raw`
     assert(frame.contentWindow.getSelection().toString() === secret, 'manual copy selects note');
     state = await stats();
     const consumed = state.calls[state.calls.length - 1];
-    assert(Object.keys(consumed.body).join(',') === 'read_token' && consumed.body.read_token === plainParts[2], 'consume sends only read token');
+    assert(Object.keys(consumed.body).join(',') === 'read_token' && consumed.body.read_token === encode64(openedSecret.slice(32)), 'consume sends only read token');
     doc = await open(link);
     click(doc, 'read-button');
     await waitFor(() => !el(doc, 'read-error').hidden, 'second read');
@@ -137,12 +177,13 @@ const harness = String.raw`
     doc = await open('/');
     el(doc, 'ttl').value = '604800';
     const protectedLink = await create(doc, 'Protected 🗝', 'cafe\u0301 password');
-    const protectedParts = new URL(protectedLink).hash.slice(1).split('.');
-    assert(protectedParts[0] === 'v1p' && protectedParts.length === 4 && !protectedLink.includes('password'), 'protected fragment format');
+    assert(/^https?:\/\/[^/]+\/n\/[0-9a-hjkmnp-tv-z]{16}$/.test(protectedLink) && !protectedLink.includes('password') && !protectedLink.includes('#'), 'protected short link');
     state = await stats();
     const protectedCreate = state.calls[state.calls.length - 1].body;
     assert(protectedCreate.ttl === 604800 && !JSON.stringify(protectedCreate).includes('password'), 'password omitted from create');
-    const salt = decode64(protectedParts[1]), nonce = decode64(protectedParts[2]), wrapped = decode64(protectedParts[3]);
+    const protectedPlain = await unseal(new URL(protectedLink).pathname.slice(3), decode64(protectedCreate.link_secret));
+    assert(protectedPlain.length === 108 && protectedPlain[0] !== undefined, 'protected package is sealed');
+    const salt = protectedPlain.slice(0, 16), nonce = protectedPlain.slice(16, 28), wrapped = protectedPlain.slice(28);
     assert(salt.length === 16 && nonce.length === 12 && wrapped.length === 80, 'protected package field lengths');
     const material = await crypto.subtle.importKey('raw', new TextEncoder().encode('café password'), 'PBKDF2', false, ['deriveKey']);
     const wrappingKey = await crypto.subtle.deriveKey({ name:'PBKDF2', salt, iterations:600000, hash:'SHA-256' }, material, { name:'AES-GCM', length:256 }, false, ['decrypt']);
@@ -167,7 +208,7 @@ const harness = String.raw`
     assert(!JSON.stringify(state.calls[state.calls.length - 1].body).includes('password'), 'password omitted from consume');
 
     doc = await open('/');
-    const originalLink = await create(doc, 'Token check');
+    const originalLink = await seedLegacy('Token check');
     const originalURL = new URL(originalLink);
     const originalParts = originalURL.hash.slice(1).split('.');
     originalParts[2] = (originalParts[2][0] === 'A' ? 'B' : 'A') + originalParts[2].slice(1);
@@ -181,7 +222,7 @@ const harness = String.raw`
     assert(el(doc, 'opened-note').textContent === 'Token check', 'incorrect token does not consume');
 
     doc = await open('/');
-    const correctedLink = await create(doc, 'Corrected fragment');
+    const correctedLink = await seedLegacy('Corrected fragment');
     const correctedURL = new URL(correctedLink);
     const correctedParts = correctedURL.hash.slice(1).split('.');
     correctedParts[1] = (correctedParts[1][0] === 'A' ? 'B' : 'A') + correctedParts[1].slice(1);
@@ -195,7 +236,7 @@ const harness = String.raw`
     assert(!el(doc, 'opened').hidden && el(doc, 'opened-note').textContent === 'Corrected fragment', 'corrected fragment uses the new key before consuming');
 
     doc = await open('/');
-    const immediateLink = await create(doc, 'Immediate fragment correction');
+    const immediateLink = await seedLegacy('Immediate fragment correction');
     const immediateURL = new URL(immediateLink);
     const immediateParts = immediateURL.hash.slice(1).split('.');
     immediateParts[1] = (immediateParts[1][0] === 'A' ? 'B' : 'A') + immediateParts[1].slice(1);
@@ -206,7 +247,7 @@ const harness = String.raw`
     assert(!el(doc, 'opened').hidden && el(doc, 'opened-note').textContent === 'Immediate fragment correction', 'confirmation uses current fragment even before hashchange event');
 
     doc = await open('/');
-    const delayedLink = await create(doc, 'Delayed password check', 'delay password');
+    const delayedLink = await seedLegacy('Delayed password check', 'delay password');
     doc = await open(delayedLink);
     const subtle = frame.contentWindow.crypto.subtle;
     const deriveKey = subtle.deriveKey.bind(subtle);
@@ -238,7 +279,7 @@ const harness = String.raw`
     assert(!el(doc, 'opened').hidden && el(doc, 'opened-note').textContent === 'Delayed password check', 'note remains readable after cancelled KDF');
 
     doc = await open('/');
-    const sentLink = await create(doc, 'Already requested');
+    const sentLink = await seedLegacy('Already requested');
     doc = await open(sentLink);
     const originalFetch = frame.contentWindow.fetch.bind(frame.contentWindow);
     let responseArrived = false;
@@ -270,7 +311,7 @@ const harness = String.raw`
     assert(el(doc, 'read-error').dataset.message === 'notFound', 'already-sent request can consume the note');
 
     doc = await open('/');
-    const keyLink = await create(doc, 'Key check');
+    const keyLink = await seedLegacy('Key check');
     const keyURL = new URL(keyLink);
     const keyParts = keyURL.hash.slice(1).split('.');
     keyParts[1] = (keyParts[1][0] === 'A' ? 'B' : 'A') + keyParts[1].slice(1);
@@ -337,22 +378,40 @@ const server = http.createServer(async (request, response) => {
       finish(result.ok ? 0 : 1);
       return;
     }
-    if (pathname === "/test/stats") return json(response, 200, { calls, creates: calls.filter((call) => call.type === "create").length, consumes: calls.filter((call) => call.type === "consume").length });
+    if (pathname === "/test/stats") return json(response, 200, { calls, creates: calls.filter((call) => call.type === "create").length, consumes: calls.filter((call) => call.type === "consume").length, materials: calls.filter((call) => call.type === "material").length });
+    if (request.method === "POST" && pathname === "/test/legacy") {
+      const body = JSON.parse(await readBody(request));
+      notes.set(body.id, body);
+      return json(response, 201, { ok: true });
+    }
     if (request.method === "POST" && pathname === "/api/notes") {
       const body = JSON.parse(await readBody(request));
       calls.push({ type: "create", body });
-      const id = crypto.randomBytes(32).toString("base64url");
-      notes.set(id, body);
-      return json(response, 201, { id });
+      if (!body.id_hash || !body.link_secret) return json(response, 400, { error: "invalid_note" });
+      notes.set(body.id_hash, body);
+      return json(response, 201, { ok: true });
+    }
+    function noteKey(id) {
+      const code = decodeURIComponent(id).toLowerCase();
+      if (/^[0-9a-hjkmnp-tv-z]{16}$/.test(code)) return crypto.createHash("sha256").update(code).digest("base64url");
+      return id;
+    }
+    function noteFor(id) { return notes.get(noteKey(id)) || null; }
+    const material = /^\/api\/notes\/([^/]+)\/material$/.exec(pathname);
+    if (request.method === "POST" && material) {
+      calls.push({ type: "material" });
+      const note = noteFor(material[1]);
+      if (!note || !note.link_secret) return json(response, 404, { error: "not_found" });
+      return json(response, 200, { link_secret: note.link_secret });
     }
     const consume = /^\/api\/notes\/([^/]+)\/consume$/.exec(pathname);
     if (request.method === "POST" && consume) {
       const body = JSON.parse(await readBody(request));
       calls.push({ type: "consume", body });
-      const note = notes.get(consume[1]);
+      const note = noteFor(consume[1]);
       const hash = crypto.createHash("sha256").update(Buffer.from(body.read_token, "base64url")).digest("base64url");
       if (!note || hash !== note.read_token_hash) return json(response, 404, { error: "not_found" });
-      notes.delete(consume[1]);
+      notes.delete(noteKey(consume[1]));
       return json(response, 200, { ciphertext: note.ciphertext, nonce: note.nonce });
     }
     const asset = pathname === "/" || pathname.startsWith("/n/") ? "index.html" : pathname.slice(1);

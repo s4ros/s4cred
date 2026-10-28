@@ -44,8 +44,15 @@ func TestEmbeddedApplicationOverHTTP(t *testing.T) {
 	token := bytes.Repeat([]byte{1}, 32)
 	hash := sha256.Sum256(token)
 	ciphertext, nonce := bytes.Repeat([]byte{2}, 17), bytes.Repeat([]byte{3}, 12)
-	create, _ := json.Marshal(map[string]any{"ciphertext": encode(ciphertext), "nonce": encode(nonce), "ttl": 86400, "read_token_hash": encode(hash[:])})
-	post := func(path string, body []byte) (*http.Response, map[string]string) {
+	code := "0123456789abcdef"
+	idHash := sha256.Sum256([]byte(code))
+	secret := bytes.Repeat([]byte{0x11}, 110)
+	secret[0], secret[1] = 0x02, 0x00
+	create, _ := json.Marshal(map[string]any{
+		"ciphertext": encode(ciphertext), "nonce": encode(nonce), "ttl": 86400, "read_token_hash": encode(hash[:]),
+		"id_hash": encode(idHash[:]), "link_secret": encode(secret),
+	})
+	post := func(path string, body []byte) (*http.Response, map[string]any) {
 		t.Helper()
 		req, err := http.NewRequest("POST", origin+path, bytes.NewReader(body))
 		if err != nil {
@@ -58,17 +65,17 @@ func TestEmbeddedApplicationOverHTTP(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer resp.Body.Close()
-		var result map[string]string
+		var result map[string]any
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			t.Fatal(err)
 		}
 		return resp, result
 	}
 	resp, result := post("/api/notes", create)
-	if resp.StatusCode != 201 || len(result["id"]) != 43 {
+	if resp.StatusCode != 201 || result["ok"] != true {
 		t.Fatalf("create: %d %v", resp.StatusCode, result)
 	}
-	id := result["id"]
+	id := code
 	resp, err = client.Get(origin + "/n/" + id)
 	if err != nil {
 		t.Fatal(err)
