@@ -1,0 +1,76 @@
+http:
+  routers:
+    create:
+      rule: "Host(`notes.example.com`) && Path(`/api/notes`)"
+      entryPoints: [websecure]
+      priority: 30
+      tls: {}
+      middlewares: [privacy, body-limit, concurrent, create-rate]
+      service: app
+    consume:
+      rule: "Host(`notes.example.com`) && PathPrefix(`/api/notes/`)"
+      entryPoints: [websecure]
+      priority: 20
+      tls: {}
+      middlewares: [privacy, body-limit, concurrent, consume-rate]
+      service: app
+    app:
+      rule: "Host(`notes.example.com`)"
+      entryPoints: [websecure]
+      priority: 1
+      tls: {}
+      middlewares: [privacy, body-limit, concurrent]
+      service: app
+  middlewares:
+    privacy:
+      headers:
+        stsSeconds: 31536000
+        customRequestHeaders:
+          Forwarded: ""
+          X-Real-IP: ""
+          X-Forwarded-Prefix: ""
+          X-Forwarded-Client-Cert: ""
+          X-Forwarded-Server: ""
+          X-Forwarded-Uri: ""
+          X-Forwarded-Method: ""
+          X-Forwarded-Scheme: ""
+          X-Forwarded-Ssl: ""
+          X-Original-URL: ""
+          Idempotency-Key: ""
+          X-Idempotency-Key: ""
+    body-limit:
+      buffering:
+        maxRequestBodyBytes: 1400000
+        memRequestBodyBytes: 1400000
+    concurrent:
+      inFlightReq:
+        amount: 20
+        sourceCriterion:
+          ipStrategy:
+            depth: 0
+    create-rate:
+      rateLimit:
+        average: 10
+        period: 1m
+        burst: 10
+    consume-rate:
+      rateLimit:
+        average: 60
+        period: 1m
+        burst: 60
+  serversTransports:
+    app-transport:
+      forwardingTimeouts:
+        dialTimeout: 5s
+        responseHeaderTimeout: 30s
+        idleConnTimeout: 30s
+  services:
+    app:
+      loadBalancer:
+        serversTransport: app-transport
+        servers:
+          - url: http://127.0.0.1:8080
+tls:
+  certificates:
+    - certFile: /etc/s4cred/tls/fullchain.pem
+      keyFile: /etc/s4cred/tls/privkey.pem

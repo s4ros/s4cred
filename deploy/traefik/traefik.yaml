@@ -1,0 +1,31 @@
+# Traefik v3.7 static configuration; run on the app host, without Docker provider.
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+entryPoints:
+  websecure:
+    address: "127.0.0.1:443"
+    forwardedHeaders:
+      insecure: false
+    http:
+      aliasHeadersStrategy: delete
+      encodedCharacters:
+        allowEncodedSlash: false
+        allowEncodedBackSlash: false
+        allowEncodedNullCharacter: false
+        allowEncodedSemicolon: false
+        allowEncodedPercent: false
+        allowEncodedQuestionMark: false
+        allowEncodedHash: false
+    transport:
+      respondingTimeouts:
+        readTimeout: 30s
+        writeTimeout: 60s
+        idleTimeout: 30s
+providers:
+  file:
+    filename: /etc/s4cred/traefik-dynamic.yaml
+    watch: true
+log:
+  level: ERROR
+# No accessLog, tracing, metrics, API, dashboard, Docker provider, or retry middleware.

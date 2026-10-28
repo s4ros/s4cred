@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>s4cred — private notes</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="ambient ambient-one" aria-hidden="true"></div>
+  <div class="ambient ambient-two" aria-hidden="true"></div>
+  <div class="shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="s4cred home"><span class="brand-mark" aria-hidden="true">✳</span><span>s4cred</span></a>
+      <div class="settings">
+        <label class="sr-only" for="language" data-i18n="language">Language</label>
+        <select id="language" aria-label="Language">
+          <option value="en">English</option><option value="pl">Polski</option>
+        </select>
+        <button id="theme" class="theme-button" type="button" aria-label="Switch to light theme"><span aria-hidden="true">☼</span><span id="theme-label">Light</span></button>
+      </div>
+    </header>
+
+    <main>
+      <noscript><p class="message error">JavaScript and Web Crypto are required to use s4cred.</p></noscript>
+      <div id="crypto-error" class="message error" role="alert" hidden data-i18n="cryptoError"></div>
+
+      <section id="create-view" hidden>
+        <div class="intro">
+          <p class="eyebrow"><span class="status-dot"></span><span data-i18n="eyebrow">PRIVATE BY DESIGN</span></p>
+          <h1 data-i18n="createTitle">A little secret,<br>shared safely.</h1>
+          <p class="lead" data-i18n="createLead">Write a note, share a link, and let it disappear after one read.</p>
+        </div>
+        <div class="card">
+          <form id="create-form" novalidate>
+            <div class="field-heading"><label for="note" data-i18n="noteLabel">Your secret note</label><span id="byte-count" class="counter">0 / 1,000,000 bytes</span></div>
+            <textarea id="note" rows="8" required aria-describedby="note-help byte-count" data-i18n-placeholder="notePlaceholder" placeholder="Write something worth keeping private..."></textarea>
+            <p id="note-help" class="hint" data-i18n="noteHelp">Encrypted in your browser. Maximum 1,000,000 UTF-8 bytes.</p>
+            <div class="form-row">
+              <div class="field">
+                <label for="ttl" data-i18n="expires">Expires after</label>
+                <select id="ttl"><option value="3600" data-i18n="oneHour">1 hour</option><option value="86400" selected data-i18n="oneDay">24 hours</option><option value="604800" data-i18n="sevenDays">7 days</option></select>
+              </div>
+              <div class="field password-toggle">
+                <label class="checkbox-label" for="protect"><input id="protect" type="checkbox"><span data-i18n="protect">Protect with a password</span></label>
+                <p class="hint" data-i18n="optional">Optional extra protection</p>
+              </div>
+            </div>
+            <div id="password-fields" class="password-fields" hidden>
+              <div class="form-row">
+                <div class="field"><label for="create-password" data-i18n="password">Password</label><input id="create-password" type="password" autocomplete="new-password"></div>
+                <div class="field"><label for="confirm-password" data-i18n="confirmPassword">Confirm password</label><input id="confirm-password" type="password" autocomplete="new-password"></div>
+              </div>
+              <p class="hint" data-i18n="passwordHelp">Choose a strong, unique password (12+ characters recommended). Share it separately; it cannot be recovered.</p>
+            </div>
+            <p id="create-error" class="message error" role="alert" hidden></p>
+            <button id="create-button" class="primary" type="submit"><span data-i18n="createButton">Create secret link</span><span aria-hidden="true">↗</span></button>
+          </form>
+          <div id="created" hidden>
+            <div class="success-icon" aria-hidden="true">✓</div>
+            <h2 data-i18n="createdTitle">Your link is ready.</h2>
+            <p class="muted" data-i18n="createdLead">Anyone with this link can attempt to open your note. Share it carefully.</p>
+            <label for="link" data-i18n="linkLabel">Single-use link</label>
+            <div class="copy-row"><input id="link" readonly><button id="copy-link" class="secondary" type="button" data-i18n="copy">Copy</button></div>
+            <p id="share-password" class="hint" hidden data-i18n="sharePassword">Send the password through a separate channel. It is not included in the link.</p>
+            <p id="link-copy-status" class="hint" role="status"></p>
+            <button id="create-another" class="text-button" type="button" data-i18n="createAnother">Create another note →</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="read-view" hidden>
+        <div class="intro">
+          <p class="eyebrow"><span class="status-dot"></span><span data-i18n="incoming">A NOTE FOR YOU</span></p>
+          <h1 data-i18n="readTitle">Someone sent you<br>a secret.</h1>
+          <p class="lead" data-i18n="readLead">Take a moment before you open it.</p>
+        </div>
+        <div class="card">
+          <div id="read-confirm">
+            <div class="notice"><span class="notice-icon" aria-hidden="true">!</span><div><strong data-i18n="warningTitle">This note can only be read once.</strong><p data-i18n="warningBody">Confirming deletes it before delivery. A lost connection, incorrect key, or decryption error can make it unrecoverable.</p></div></div>
+            <form id="read-form" novalidate>
+              <div id="read-password-field" class="field read-password" hidden><label for="read-password" data-i18n="password">Password</label><input id="read-password" type="password" autocomplete="current-password" aria-describedby="read-password-help"><p id="read-password-help" class="hint" data-i18n="readPasswordHelp">Enter the password shared with you separately. An incorrect password will not consume the note.</p></div>
+              <p id="read-interrupted" class="message error" role="alert" hidden></p>
+              <p id="read-error" class="message error" role="alert" hidden></p>
+              <button id="read-button" class="primary" type="submit"><span data-i18n="readButton">Open and delete note</span><span aria-hidden="true">↗</span></button>
+            </form>
+          </div>
+          <div id="opened" hidden>
+            <div class="success-icon" aria-hidden="true">✓</div>
+            <h2 data-i18n="openedTitle">The note is yours.</h2>
+            <p class="muted" data-i18n="openedLead">It has been deleted from the service. Save anything you need now.</p>
+            <div class="field-heading"><span class="field-label" data-i18n="noteLabel">Your secret note</span><button id="copy-note" class="secondary" type="button" data-i18n="copy">Copy</button></div>
+            <pre id="opened-note" tabindex="0" aria-label="Your secret note"></pre>
+            <p id="note-copy-status" class="hint" role="status"></p>
+          </div>
+        </div>
+      </section>
+      <p class="privacy"><span aria-hidden="true">✧</span> <span data-i18n="footer">Encrypted on your device · No account needed · One read only</span></p>
+    </main>
+  </div>
+</body>
+</html>

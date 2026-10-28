@@ -1,0 +1,16 @@
+.git
+.env
+.env.*
+*.db
+*.db-*
+*.sqlite*
+data
+docs
+deploy
+README.md
+s4cred
+tests
+node_modules
+coverage
+test-results
+playwright-report

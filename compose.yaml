@@ -1,0 +1,21 @@
+services:
+  s4cred:
+    build: .
+    restart: unless-stopped
+    environment:
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:8080}
+      DATABASE_PATH: ${DATABASE_PATH:-/data/notes.db}
+      LISTEN_ADDR: ${LISTEN_ADDR:-:8080}
+      MAX_ACTIVE_NOTES: ${MAX_ACTIVE_NOTES:-10000}
+      MAX_ACTIVE_BYTES: ${MAX_ACTIVE_BYTES:-1000000000}
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - s4cred-data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  s4cred-data:

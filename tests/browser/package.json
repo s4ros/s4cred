@@ -1,0 +1,10 @@
+{
+  "name": "s4cred-browser-tests",
+  "private": true,
+  "scripts": {
+    "test": "node --test browser.test.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.58.2"
+  }
+}

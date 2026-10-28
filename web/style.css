@@ -1,0 +1,61 @@
+:root { color-scheme: dark; --bg:#0b0e1b; --card:#14192a; --input:#0d1221; --text:#f3f5ff; --muted:#b0bbd2; --line:#35405a; --accent:#ad9cff; --accent-ink:#161029; --notice:#29233b; --danger:#ffb8c4; --shadow:0 24px 80px #0006; }
+:root[data-theme="light"] { color-scheme:light; --bg:#f4f5fc; --card:#fff; --input:#f8f9ff; --text:#20233b; --muted:#535e76; --line:#c7cde0; --accent:#5941b6; --accent-ink:#fff; --notice:#f2efff; --danger:#a21b3d; --shadow:0 24px 80px #36306a1a; }
+* { box-sizing:border-box; }
+[hidden] { display:none !important; }
+body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font:16px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+.ambient { position:fixed; z-index:-1; width:36rem; height:36rem; border-radius:50%; filter:blur(100px); opacity:.13; pointer-events:none; }
+.ambient-one { top:-22rem; right:-8rem; background:#9278ff; }
+.ambient-two { bottom:-24rem; left:-10rem; background:#53d1cb; }
+.shell { width:min(100% - 2.5rem, 1080px); margin:auto; }
+.topbar { display:flex; justify-content:space-between; align-items:center; gap:1rem; padding:1.6rem 0; }
+.brand { display:flex; gap:.65rem; align-items:center; color:var(--text); text-decoration:none; font-size:1.25rem; font-weight:750; letter-spacing:-.04em; }
+.brand-mark { display:grid; place-items:center; width:2.2rem; height:2.2rem; border:1px solid var(--line); border-radius:.7rem; color:var(--accent); font-size:1.4rem; }
+.settings { display:flex; gap:.5rem; align-items:center; }
+button, input, textarea, select { font:inherit; }
+button, select { cursor:pointer; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, a:focus-visible, pre:focus-visible { outline:3px solid var(--accent); outline-offset:3px; }
+.settings select, .theme-button { width:auto; background:transparent; border:1px solid var(--line); color:var(--text); border-radius:.7rem; padding:.5rem .7rem; font-size:.85rem; }
+.theme-button { display:flex; gap:.45rem; align-items:center; }
+main { width:min(100%, 660px); margin:3.2rem auto 0; }
+.intro { margin-bottom:2rem; }
+.eyebrow { display:flex; gap:.55rem; align-items:center; color:var(--accent); font-size:.73rem; font-weight:750; letter-spacing:.15em; }
+.status-dot { width:.45rem; height:.45rem; border-radius:50%; background:#57d9b5; box-shadow:0 0 12px #57d9b5; }
+h1 { font-size:clamp(2.35rem, 6vw, 4rem); line-height:1.09; letter-spacing:-.055em; margin:.8rem 0 1rem; white-space:pre-line; }
+h2 { font-size:1.6rem; line-height:1.2; letter-spacing:-.035em; margin:.85rem 0 .5rem; }
+.lead { margin:0; color:var(--muted); font-size:1.05rem; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:1.25rem; padding:clamp(1.25rem, 4vw, 2rem); box-shadow:var(--shadow); }
+label, .field-label { display:block; font-size:.9rem; font-weight:700; }
+.field-heading { display:flex; justify-content:space-between; align-items:center; gap:1rem; margin-bottom:.55rem; }
+.counter, .hint, .muted { color:var(--muted); }
+.counter { font-size:.76rem; white-space:nowrap; }
+textarea, input:not([type="checkbox"]), .field select { display:block; width:100%; color:var(--text); background:var(--input); border:1px solid var(--line); border-radius:.7rem; padding:.8rem .9rem; }
+textarea { resize:vertical; min-height:11rem; }
+textarea::placeholder { color:var(--muted); opacity:.8; }
+.hint { font-size:.8rem; margin:.5rem 0 0; }
+.form-row { display:grid; grid-template-columns:1fr 1fr; gap:1.25rem; margin-top:1.5rem; }
+.field label:not(.checkbox-label) { margin-bottom:.55rem; }
+.checkbox-label { display:flex; gap:.6rem; align-items:center; cursor:pointer; }
+input[type="checkbox"] { width:1.15rem; height:1.15rem; margin:0; accent-color:var(--accent); }
+.password-toggle { align-self:end; padding-bottom:.1rem; }
+.password-fields { margin-top:1rem; padding-top:.25rem; border-top:1px solid var(--line); }
+.primary, .secondary { border:0; border-radius:.7rem; font-weight:700; }
+.primary { display:flex; justify-content:space-between; align-items:center; gap:1rem; width:100%; margin-top:1.5rem; padding:.95rem 1.1rem; color:var(--accent-ink); background:var(--accent); }
+.primary:disabled { opacity:.65; cursor:wait; }
+.secondary { padding:.65rem 1rem; color:var(--text); border:1px solid var(--line); background:var(--input); }
+.text-button { background:none; border:0; padding:0; margin-top:1.4rem; color:var(--accent); font-weight:700; }
+.message { border-radius:.7rem; padding:.8rem 1rem; }
+.error { color:var(--danger); background:var(--notice); border:1px solid var(--danger); font-size:.9rem; }
+.notice { display:flex; gap:.9rem; background:var(--notice); border:1px solid var(--line); border-radius:.8rem; padding:1rem; }
+.notice p { color:var(--muted); font-size:.9rem; margin:.35rem 0 0; }
+.notice-icon { display:grid; place-items:center; flex:none; width:1.6rem; height:1.6rem; border:1px solid var(--accent); color:var(--accent); border-radius:50%; font-weight:700; }
+.read-password { margin-top:1.5rem; }
+.success-icon { display:grid; place-items:center; width:2.5rem; height:2.5rem; background:var(--notice); color:var(--accent); border-radius:.8rem; font-size:1.3rem; }
+.muted { margin:.5rem 0 1.4rem; }
+.copy-row { display:flex; gap:.6rem; margin-top:.5rem; }
+.copy-row input { min-width:0; }
+pre { white-space:pre-wrap; overflow-wrap:anywhere; overflow:auto; max-height:32rem; padding:1rem; background:var(--input); border:1px solid var(--line); border-radius:.7rem; font:inherit; }
+.privacy { color:var(--muted); text-align:center; font-size:.8rem; margin:1.8rem 0 3rem; }
+.privacy span:first-child { color:var(--accent); }
+.sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+@media (max-width:520px) { .shell { width:min(100% - 1.5rem, 1080px); } .topbar { padding:1rem 0; } main { margin-top:2rem; } .form-row { grid-template-columns:1fr; gap:1rem; } .field-heading { flex-wrap:wrap; } .theme-button { font-size:.8rem; } }
+@media (prefers-reduced-motion:reduce) { *, *::before, *::after { scroll-behavior:auto !important; animation-duration:.01ms !important; transition-duration:.01ms !important; } }
