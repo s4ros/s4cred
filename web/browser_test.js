@@ -74,8 +74,11 @@ const harness = String.raw`
     assert(doc.documentElement.dataset.theme === 'light' && doc.documentElement.lang === 'pl', 'preference controls');
     doc = await open('/');
     assert(doc.documentElement.dataset.theme === 'light' && doc.documentElement.lang === 'pl', 'preferences persist');
+    const credit = doc.querySelector('.credit a');
+    assert(credit.getAttribute('href') === 'https://infinigy.pl' && credit.rel.includes('noreferrer') && credit.textContent === 'infinigy.pl' && doc.querySelector('[data-i18n="credit"]').textContent === 'Stworzone przez Stefana', 'credit link');
     el(doc, 'language').value = 'en';
     el(doc, 'language').dispatchEvent(new Event('change', { bubbles: true }));
+    assert(doc.querySelector('[data-i18n="credit"]').textContent === 'Created by Stefan' && doc.querySelector('.credit a').textContent === 'infinigy.pl', 'english credit keeps the link');
     fill(doc, 'note', 'é🙂');
     assert(el(doc, 'byte-count').textContent.startsWith('6 /'), 'counter measures UTF-8 bytes');
     click(doc, 'protect');
