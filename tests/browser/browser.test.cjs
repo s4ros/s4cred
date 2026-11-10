@@ -40,17 +40,53 @@ async function waitForServer() {
   throw new Error('Server did not start');
 }
 
+function shortCode() {
+  const alphabet = '0123456789abcdefghjkmnpqrstvwxyz';
+  let code = '';
+  for (const byte of crypto.randomBytes(16)) code += alphabet[byte & 31];
+  return code;
+}
+
+function linkSecret() {
+  const secret = Buffer.alloc(110);
+  secret[0] = 0x02;
+  secret[1] = 0x00;
+  crypto.randomFillSync(secret.subarray(2));
+  return secret.toString('base64url');
+}
+
 function makeNote() {
   const token = crypto.randomBytes(32);
+  const code = shortCode();
   return {
     token: token.toString('base64url'),
+    code,
     request: {
       nonce: crypto.randomBytes(12).toString('base64url'),
       ciphertext: crypto.randomBytes(17).toString('base64url'),
       ttl: 3600,
       read_token_hash: crypto.createHash('sha256').update(token).digest('base64url'),
+      id_hash: crypto.createHash('sha256').update(code).digest('base64url'),
+      link_secret: linkSecret(),
     },
   };
+}
+
+function shortLinkCode(link) {
+  const url = new URL(link);
+  assert.equal(url.hash, '');
+  assert.match(url.pathname, /^\/n\/[0-9a-hjkmnp-tv-z]{16}$/);
+  return url.pathname.slice(3);
+}
+
+function unsealPackage(code, blob) {
+  if ((blob.length !== 110 && blob.length !== 154) || blob[0] !== 0x02 || (blob[1] !== 0 && blob[1] !== 1) || (blob[1] === 0 ? 110 : 154) !== blob.length) {
+    throw new Error('Invalid seal');
+  }
+  const key = Buffer.from(crypto.hkdfSync('sha256', Buffer.from(code), blob.subarray(2, 18), Buffer.from('s4cred-short-link-v1'), 32));
+  const plain = decryptGCM(key, blob.subarray(18, 30), blob.subarray(30));
+  if ((blob[1] === 0 && plain.length !== 64) || (blob[1] === 1 && plain.length !== 108)) throw new Error('Invalid package');
+  return plain;
 }
 
 async function post(route, body) {
@@ -156,14 +192,15 @@ test('unprotected browser flow encrypts locally and reads only once', { timeout:
     await page.locator('#create-button').click();
     await page.locator('#created').waitFor({ state: 'visible' });
     const link = await page.locator('#link').inputValue();
-    const url = new URL(link);
-    const [version, keyText, tokenText] = url.hash.slice(1).split('.');
-    assert.equal(version, 'v1');
-    const key = Buffer.from(keyText, 'base64url');
-    const token = Buffer.from(tokenText, 'base64url');
+    const code = shortLinkCode(link);
+    const creation = JSON.parse(requests.find((request) => request.url.endsWith('/api/notes')).body);
+    const opened = unsealPackage(code, Buffer.from(creation.link_secret, 'base64url'));
+    const key = opened.subarray(0, 32);
+    const token = opened.subarray(32);
+    const keyText = key.toString('base64url');
+    const tokenText = token.toString('base64url');
     assert.equal(key.length, 32);
     assert.equal(token.length, 32);
-    const creation = JSON.parse(requests.find((request) => request.url.endsWith('/api/notes')).body);
     assert.equal(creation.read_token_hash, crypto.createHash('sha256').update(token).digest('base64url'));
     assert.equal(decryptGCM(key, Buffer.from(creation.nonce, 'base64url'), Buffer.from(creation.ciphertext, 'base64url')).toString('utf8'), secret);
     const sent = JSON.stringify(creation);
@@ -180,9 +217,9 @@ test('unprotected browser flow encrypts locally and reads only once', { timeout:
     assert.equal(consume.length, 1);
     assert.deepEqual(JSON.parse(consume[0].body), { read_token: tokenText });
     await page.reload();
-    await page.locator('#read-button').click();
     await page.locator('#read-error').waitFor({ state: 'visible' });
     assert.equal(await page.locator('#read-error').getAttribute('data-message'), 'notFound');
+    assert.equal(requests.filter((request) => request.url.endsWith('/consume')).length, 1);
   } finally {
     await context.close();
   }
@@ -205,19 +242,19 @@ test('password-protected browser flow verifies locally and interoperates with No
     await page.locator('#create-button').click();
     await page.locator('#created').waitFor({ state: 'visible' });
     const link = await page.locator('#link').inputValue();
-    const [version, saltText, nonceText, wrappedText] = new URL(link).hash.slice(1).split('.');
-    assert.equal(version, 'v1p');
+    const code = shortLinkCode(link);
     assert(!link.includes('password'));
-    const salt = Buffer.from(saltText, 'base64url');
-    const nonce = Buffer.from(nonceText, 'base64url');
-    const wrapped = Buffer.from(wrappedText, 'base64url');
+    const creation = JSON.parse(requests.find((request) => request.url.endsWith('/api/notes')).body);
+    const packed = unsealPackage(code, Buffer.from(creation.link_secret, 'base64url'));
+    const salt = packed.subarray(0, 16);
+    const nonce = packed.subarray(16, 28);
+    const wrapped = packed.subarray(28);
     assert.equal(salt.length, 16);
     assert.equal(nonce.length, 12);
     assert.equal(wrapped.length, 80);
     const wrappingKey = crypto.pbkdf2Sync('Café password', salt, 600000, 32, 'sha256');
     const pair = decryptGCM(wrappingKey, nonce, wrapped);
     assert.equal(pair.length, 64);
-    const creation = JSON.parse(requests.find((request) => request.url.endsWith('/api/notes')).body);
     assert.equal(creation.read_token_hash, crypto.createHash('sha256').update(pair.subarray(32)).digest('base64url'));
     assert.equal(decryptGCM(pair.subarray(0, 32), Buffer.from(creation.nonce, 'base64url'), Buffer.from(creation.ciphertext, 'base64url')).toString('utf8'), secret);
     assert(!JSON.stringify(creation).includes('password'));
@@ -323,12 +360,9 @@ test('correcting a same-page link fragment uses the corrected credentials', { ti
     await page.locator('#create-button').click();
     await page.locator('#created').waitFor({ state: 'visible' });
     const link = await page.locator('#link').inputValue();
-    const wrong = new URL(link);
-    const parts = wrong.hash.slice(1).split('.');
-    parts[1] = (parts[1][0] === 'A' ? 'B' : 'A') + parts[1].slice(1);
-    wrong.hash = parts.join('.');
-    await page.goto(wrong.href);
-    await page.goto(link);
+    shortLinkCode(link);
+    await page.goto(`${link}#changed`);
+    await page.evaluate(() => { location.hash = ''; });
     await page.locator('#read-interrupted').waitFor({ state: 'visible' });
     await page.locator('#read-button').click();
     await page.locator('#opened').waitFor({ state: 'visible' });
@@ -342,9 +376,12 @@ test('changing a protected fragment during password derivation cannot send stale
   const context = await browser.newContext({ locale: 'en-US' });
   try {
     const page = await context.newPage();
+    const requests = [];
     const consumes = [];
     page.on('request', (request) => {
-      if (request.method() === 'POST' && request.url().endsWith('/consume')) consumes.push(request);
+      if (request.method() !== 'POST') return;
+      if (request.url().endsWith('/consume')) consumes.push(request);
+      else requests.push({ url: request.url(), body: request.postData() });
     });
     await page.goto(origin);
     await page.locator('#note').fill('Derivation race');
@@ -354,13 +391,17 @@ test('changing a protected fragment during password derivation cannot send stale
     await page.locator('#create-button').click();
     await page.locator('#created').waitFor({ state: 'visible' });
     const link = await page.locator('#link').inputValue();
-    const url = new URL(link);
-    const parts = url.hash.slice(1).split('.');
-    const wrappingKey = crypto.pbkdf2Sync('race password', Buffer.from(parts[1], 'base64url'), 600000, 32, 'sha256');
-    const pair = decryptGCM(wrappingKey, Buffer.from(parts[2], 'base64url'), Buffer.from(parts[3], 'base64url'));
+    const code = shortLinkCode(link);
+    const creation = JSON.parse(requests.find((request) => request.url.endsWith('/api/notes')).body);
+    const packed = unsealPackage(code, Buffer.from(creation.link_secret, 'base64url'));
+    const wrappingKey = crypto.pbkdf2Sync('race password', packed.subarray(0, 16), 600000, 32, 'sha256');
+    const pair = decryptGCM(wrappingKey, packed.subarray(16, 28), packed.subarray(28));
     await page.goto(link);
+    await page.locator('#read-password').waitFor({ state: 'visible' });
+    await page.waitForFunction(() => !document.getElementById('read-button').disabled);
     await page.evaluate(() => {
       const original = crypto.subtle.deriveKey.bind(crypto.subtle);
+      window.originalDeriveKey = original;
       crypto.subtle.deriveKey = async (...args) => {
         await new Promise((resolve) => { window.releaseDerivation = resolve; });
         return original(...args);
@@ -369,13 +410,20 @@ test('changing a protected fragment during password derivation cannot send stale
     await page.locator('#read-password').fill('race password');
     await page.locator('#read-button').click();
     await page.waitForFunction(() => typeof window.releaseDerivation === 'function');
-    parts[2] = (parts[2][0] === 'A' ? 'B' : 'A') + parts[2].slice(1);
-    await page.evaluate((fragment) => { location.hash = fragment; }, parts.join('.'));
+    await page.evaluate(() => { location.hash = 'changed'; });
     await page.locator('#read-interrupted').waitFor({ state: 'visible' });
     await page.evaluate(() => { if (window.releaseDerivation) window.releaseDerivation(); });
-    await page.waitForFunction(() => !document.getElementById('read-button').disabled);
+    await page.waitForFunction(() => document.getElementById('read-button').firstElementChild.textContent !== 'Opening...');
     assert.equal(consumes.length, 0);
-    const response = await post(`/api/notes/${url.pathname.split('/').pop()}/consume`, { read_token: pair.subarray(32).toString('base64url') });
+    await page.evaluate(() => { crypto.subtle.deriveKey = window.originalDeriveKey; });
+    await page.evaluate(() => { location.hash = ''; });
+    await page.waitForFunction(() => {
+      const button = document.getElementById('read-button');
+      const password = document.getElementById('read-password-field');
+      return button && !button.disabled && password && !password.hidden;
+    });
+    assert.equal(consumes.length, 0);
+    const response = await post(`/api/notes/${code}/consume`, { read_token: pair.subarray(32).toString('base64url') });
     assert.equal(response.status, 200);
   } finally {
     await context.close();
@@ -386,13 +434,18 @@ test('changing a fragment after a read was sent warns about possible consumption
   const context = await browser.newContext({ locale: 'en-US' });
   try {
     const page = await context.newPage();
+    const requests = [];
+    page.on('request', (request) => {
+      if (request.method() === 'POST' && request.url().endsWith('/api/notes')) requests.push(request.postData());
+    });
     await page.goto(origin);
     await page.locator('#note').fill('Already sent');
     await page.locator('#create-button').click();
     await page.locator('#created').waitFor({ state: 'visible' });
     const link = await page.locator('#link').inputValue();
-    const url = new URL(link);
-    const parts = url.hash.slice(1).split('.');
+    const code = shortLinkCode(link);
+    const plain = unsealPackage(code, Buffer.from(JSON.parse(requests[0]).link_secret, 'base64url'));
+    const token = plain.subarray(32).toString('base64url');
     let responseReady;
     const received = new Promise((resolve) => { responseReady = resolve; });
     let releaseResponse;
@@ -404,16 +457,17 @@ test('changing a fragment after a read was sent warns about possible consumption
       await route.fulfill({ response });
     });
     await page.goto(link);
+    await page.waitForFunction(() => !document.getElementById('read-button').disabled);
     await page.locator('#read-button').click();
     await received;
-    parts[1] = (parts[1][0] === 'A' ? 'B' : 'A') + parts[1].slice(1);
-    await page.evaluate((fragment) => { location.hash = fragment; }, parts.join('.'));
+    await page.evaluate(() => { location.hash = 'changed'; });
     await page.locator('#read-interrupted').waitFor({ state: 'visible' });
     assert.equal(await page.locator('#read-interrupted').getAttribute('data-message'), 'readChangedAfterRequest');
     releaseResponse();
-    await page.waitForFunction(() => !document.getElementById('read-button').disabled);
+    await page.waitForFunction(() => document.getElementById('read-button').firstElementChild.textContent !== 'Opening...');
     assert.equal(await page.locator('#opened').isVisible(), false);
-    const response = await post(`/api/notes/${url.pathname.split('/').pop()}/consume`, { read_token: parts[2] });
+    assert.equal(await page.locator('#read-interrupted').getAttribute('data-message'), 'readChangedAfterRequest');
+    const response = await post(`/api/notes/${code}/consume`, { read_token: token });
     assert.equal(response.status, 404);
   } finally {
     await context.close();
@@ -491,9 +545,15 @@ test('creation controls are reachable and usable with a keyboard', async () => {
   try {
     const page = await context.newPage();
     await page.goto(origin);
-    for (const selector of ['.brand', '#language', '#theme', '#note', '#ttl', '#protect']) {
+    for (const selector of ['.brand', '#language', '#theme', 'input[name="payload"][value="note"]', '#note', '#ttl', '#protect']) {
       await page.keyboard.press('Tab');
       assert.equal(await page.locator(selector).evaluate((element) => element === document.activeElement), true, `${selector} is reachable`);
+      if (selector === 'input[name="payload"][value="note"]') {
+        await page.keyboard.press('ArrowRight');
+        assert.equal(await page.locator('input[name="payload"][value="file"]').evaluate((element) => element === document.activeElement), true, 'file radio is reachable');
+        await page.keyboard.press('ArrowLeft');
+        assert.equal(await page.locator(selector).evaluate((element) => element === document.activeElement), true, 'note radio stays in tab order');
+      }
     }
     await page.keyboard.press('Space');
     assert.equal(await page.locator('#protect').isChecked(), true);
@@ -559,8 +619,8 @@ test('invalid read-token types cannot consume a note', async () => {
   const note = makeNote();
   const created = await post('/api/notes', note.request);
   assert.equal(created.status, 201);
-  const { id } = await created.json();
-  const route = `/api/notes/${id}/consume`;
+  assert.equal((await created.json()).ok, true);
+  const route = `/api/notes/${note.code}/consume`;
   for (const payload of [{}, { read_token: null }, { read_token: 1 }, { read_token: [] },
     { read_token: 'invalid' }, { read_token: crypto.randomBytes(32).toString('base64url') },
     { read_token: note.token, extra: 'unexpected' }]) {
@@ -579,25 +639,25 @@ test('opening a link does not consume the note and responses have privacy header
   const note = makeNote();
   const created = await post('/api/notes', note.request);
   assert.equal(created.status, 201);
-  const { id } = await created.json();
+  assert.equal((await created.json()).ok, true);
   for (let attempt = 0; attempt < 2; attempt++) {
-    const response = await fetch(`${origin}/n/${id}`);
+    const response = await fetch(`${origin}/n/${note.code}`);
     assert.equal(response.status, 200);
     assert.equal(response.headers.get('cache-control'), 'no-store');
     assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
     assert.match(response.headers.get('content-security-policy'), /default-src 'none'/);
     await response.arrayBuffer();
   }
-  assert.equal((await post(`/api/notes/${id}/consume`, { read_token: note.token })).status, 200);
+  assert.equal((await post(`/api/notes/${note.code}/consume`, { read_token: note.token })).status, 200);
 });
 
 test('only one concurrent authorized reader can consume the note', async () => {
   const note = makeNote();
   const created = await post('/api/notes', note.request);
   assert.equal(created.status, 201);
-  const { id } = await created.json();
+  assert.equal((await created.json()).ok, true);
   const results = await Promise.all(Array.from({ length: 16 }, async () => {
-    const response = await post(`/api/notes/${id}/consume`, { read_token: note.token });
+    const response = await post(`/api/notes/${note.code}/consume`, { read_token: note.token });
     await response.arrayBuffer();
     return response.status;
   }));
@@ -610,10 +670,10 @@ test('the API accepts the exact ciphertext size limit and rejects a larger ciphe
   note.request.ciphertext = crypto.randomBytes(1000016).toString('base64url');
   const allowed = await post('/api/notes', note.request);
   assert.equal(allowed.status, 201);
-  const { id } = await allowed.json();
+  assert.equal((await allowed.json()).ok, true);
   note.request.ciphertext = crypto.randomBytes(1000017).toString('base64url');
   assert.equal((await post('/api/notes', note.request)).status, 400);
-  assert.equal((await post(`/api/notes/${id}/consume`, { read_token: note.token })).status, 200);
+  assert.equal((await post(`/api/notes/${note.code}/consume`, { read_token: note.token })).status, 200);
 });
 
 test('a foreign origin cannot create a note', async () => {
