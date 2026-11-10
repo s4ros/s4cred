@@ -35,9 +35,21 @@
         </div>
         <div class="card">
           <form id="create-form" novalidate>
-            <div class="field-heading"><label for="note" data-i18n="noteLabel">Your secret note</label><span id="byte-count" class="counter">0 / 1,000,000 bytes</span></div>
-            <textarea id="note" rows="8" required aria-describedby="note-help byte-count" data-i18n-placeholder="notePlaceholder" placeholder="Write something worth keeping private..."></textarea>
-            <p id="note-help" class="hint" data-i18n="noteHelp">Encrypted in your browser. Maximum 1,000,000 UTF-8 bytes.</p>
+            <fieldset class="mode">
+              <legend data-i18n="payloadKind">Secret type</legend>
+              <label><input type="radio" name="payload" value="note" checked> <span data-i18n="modeNote">Note</span></label>
+              <label><input type="radio" name="payload" value="file"> <span data-i18n="modeFile">File</span></label>
+            </fieldset>
+            <div id="note-field">
+              <div class="field-heading"><label for="note" data-i18n="noteLabel">Your secret note</label><span id="byte-count" class="counter">0 / 1,000,000 bytes</span></div>
+              <textarea id="note" rows="8" required aria-describedby="note-help byte-count" data-i18n-placeholder="notePlaceholder" placeholder="Write something worth keeping private..."></textarea>
+              <p id="note-help" class="hint" data-i18n="noteHelp">Encrypted in your browser. Maximum 1,000,000 UTF-8 bytes.</p>
+            </div>
+            <div id="file-field" class="field" hidden>
+              <div class="field-heading"><label for="file" data-i18n="fileLabel">File</label><span id="file-size" class="counter"></span></div>
+              <input id="file" type="file">
+              <p class="hint" data-i18n="fileHelp">Encrypted in your browser before upload. Maximum 32 MiB. One file.</p>
+            </div>
             <div class="form-row">
               <div class="field">
                 <label for="ttl" data-i18n="expires">Expires after</label>
@@ -80,6 +92,7 @@
         <div class="card">
           <div id="read-confirm">
             <div class="notice"><span class="notice-icon" aria-hidden="true">!</span><div><strong data-i18n="warningTitle">This note can only be read once.</strong><p data-i18n="warningBody">Confirming deletes it before delivery. A lost connection, incorrect key, or decryption error can make it unrecoverable.</p></div></div>
+            <p id="file-summary" class="hint" hidden></p>
             <form id="read-form" novalidate>
               <div id="read-password-field" class="field read-password" hidden><label for="read-password" data-i18n="password">Password</label><input id="read-password" type="password" autocomplete="current-password" aria-describedby="read-password-help"><p id="read-password-help" class="hint" data-i18n="readPasswordHelp">Enter the password shared with you separately. An incorrect password will not consume the note.</p></div>
               <p id="read-interrupted" class="message error" role="alert" hidden></p>
@@ -94,6 +107,13 @@
             <div class="field-heading"><span class="field-label" data-i18n="noteLabel">Your secret note</span><button id="copy-note" class="secondary" type="button" data-i18n="copy">Copy</button></div>
             <pre id="opened-note" tabindex="0" aria-label="Your secret note"></pre>
             <p id="note-copy-status" class="hint" role="status"></p>
+          </div>
+          <div id="opened-file" hidden>
+            <div class="success-icon" aria-hidden="true">✓</div>
+            <h2 data-i18n="fileReadyTitle">The file is yours.</h2>
+            <p class="muted" data-i18n="fileReadyLead">It has been deleted from the service. Save it now.</p>
+            <button id="download-file" class="secondary" type="button" data-i18n="download">Download</button>
+            <p id="file-download-status" class="hint" role="status"></p>
           </div>
         </div>
       </section>
