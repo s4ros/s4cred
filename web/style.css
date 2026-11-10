@@ -31,7 +31,7 @@ label, .field-label { display:block; font-size:.9rem; font-weight:700; }
 .field-heading { display:flex; justify-content:space-between; align-items:center; gap:1rem; margin-bottom:.55rem; }
 .counter, .hint, .muted { color:var(--muted); }
 .counter { font-size:.76rem; white-space:nowrap; }
-textarea, input:not([type="checkbox"]), .field select { display:block; width:100%; color:var(--text); background:var(--input); border:1px solid var(--line); border-radius:.7rem; padding:.8rem .9rem; }
+textarea, input:not([type="checkbox"]):not([type="radio"]), .field select { display:block; width:100%; color:var(--text); background:var(--input); border:1px solid var(--line); border-radius:.7rem; padding:.8rem .9rem; }
 textarea { resize:vertical; min-height:11rem; }
 textarea::placeholder { color:var(--muted); opacity:.8; }
 .hint { font-size:.8rem; margin:.5rem 0 0; }
@@ -39,6 +39,7 @@ textarea::placeholder { color:var(--muted); opacity:.8; }
 .field label:not(.checkbox-label) { margin-bottom:.55rem; }
 .checkbox-label { display:flex; gap:.6rem; align-items:center; cursor:pointer; }
 input[type="checkbox"] { width:1.15rem; height:1.15rem; margin:0; accent-color:var(--accent); }
+input[type="radio"] { width:auto; padding:0; border:0; background:none; }
 .password-toggle { align-self:end; padding-bottom:.1rem; }
 .password-fields { margin-top:1rem; padding-top:.25rem; border-top:1px solid var(--line); }
 .primary, .secondary { border:0; border-radius:.7rem; font-weight:700; }

@@ -131,13 +131,17 @@
     $("file-field").hidden = payloadMode !== "file";
     $("file-size").textContent = selectedFile ? `${selectedFile.size.toLocaleString(language)} ${text("bytes")}` : "";
     if (fileMeta) {
+      const safeName = sanitizeFileName(fileMeta.name);
+      const fileLabel = `${safeName} · ${fileMeta.size.toLocaleString(language)} ${text("bytes")}`;
       $("file-summary").hidden = false;
-      $("file-summary").textContent = `${fileMeta.name} · ${fileMeta.size.toLocaleString(language)} ${text("bytes")}`;
+      $("file-summary").textContent = fileLabel;
+      $("file-download-status").textContent = fileLabel;
       document.querySelector('[data-i18n="warningTitle"]').textContent = text("fileWarningTitle");
       document.querySelector('[data-i18n="warningBody"]').textContent = text("fileWarningBody");
     } else {
       $("file-summary").hidden = true;
       $("file-summary").textContent = "";
+      $("file-download-status").textContent = "";
     }
     const createLabel = !createBusy ? "createButton" : payloadMode === "file" ? (createPhase === "uploading" ? "uploading" : "encrypting") : "creating";
     let readLabel = "readButton";

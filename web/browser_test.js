@@ -343,7 +343,10 @@ const harness = String.raw`
     assert(fileRadio, 'file radio');
     fileRadio.checked = true;
     fileRadio.dispatchEvent(new Event('change', { bubbles: true }));
-    const sample = new frame.contentWindow.File(['hello file'], 'report.pdf', { type: 'application/pdf' });
+    const rawName = 'secret/' + String.fromCharCode(0x202E) + 'report.pdf';
+    const safeName = 'report.pdf';
+    const sample = new frame.contentWindow.File(['hello file'], rawName, { type: 'application/pdf' });
+    assert(sample.name === rawName, 'metadata name keeps the path and bidi mark: ' + sample.name);
     const sampleTransfer = new frame.contentWindow.DataTransfer();
     sampleTransfer.items.add(sample);
     el(doc, 'file').files = sampleTransfer.files;
@@ -356,7 +359,9 @@ const harness = String.raw`
     const fileCreated = (await stats()).calls.filter((call) => call.type === 'create').pop();
     const consumesBeforeFile = (await stats()).consumes;
     doc = await open(fileLink);
-    await waitFor(() => !el(doc, 'file-summary').hidden && el(doc, 'file-summary').textContent.indexOf('report.pdf') !== -1, 'file summary');
+    await waitFor(() => !el(doc, 'file-summary').hidden && el(doc, 'file-summary').textContent.length > 0, 'file summary');
+    assert(el(doc, 'file-summary').textContent === safeName + ' · 10 bytes', 'pre-confirm summary shows sanitized name and exact size, got ' + el(doc, 'file-summary').textContent);
+    assert(el(doc, 'file-summary').textContent.indexOf(rawName) === -1, 'pre-confirm summary hides the raw name');
     assert((await stats()).consumes === consumesBeforeFile, 'file summary does not consume');
     const downloads = [];
     const payloads = [];
@@ -377,7 +382,9 @@ const harness = String.raw`
     click(doc, 'read-button');
     await waitFor(() => !el(doc, 'opened-file').hidden || !el(doc, 'read-error').hidden, 'file read');
     assert(!el(doc, 'opened-file').hidden, 'file ready view: ' + el(doc, 'read-error').textContent);
-    assert(downloads.length === 1 && downloads[0].name === 'report.pdf', 'download anchor invoked');
+    assert(el(doc, 'file-download-status').textContent === safeName + ' · 10 bytes', 'opened file shows sanitized name and exact size, got ' + el(doc, 'file-download-status').textContent);
+    assert(el(doc, 'opened-file').textContent.indexOf(rawName) === -1 && el(doc, 'download-file').textContent.length > 0, 'opened file hides the raw name and keeps Download');
+    assert(downloads.length === 1 && downloads[0].name === safeName, 'download anchor invoked');
     assert(payloads.length === 1 && String(payloads[0].type || '').indexOf('application/vnd.s4cred.payload') !== -1, 'payload content type');
     const packed = payloads[0].bytes;
     const packedLength = new DataView(packed.buffer, packed.byteOffset, packed.byteLength).getUint32(0);
