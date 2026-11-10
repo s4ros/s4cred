@@ -12,20 +12,27 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/s4ros/s4cred/internal/blob"
 	"github.com/s4ros/s4cred/internal/httpapi"
 	"github.com/s4ros/s4cred/internal/store"
 	"github.com/s4ros/s4cred/web"
 )
 
 func TestEmbeddedApplicationOverHTTP(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "notes.db"), 10, 10000)
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "notes.db"), 10, 10000)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	blobs, err := blob.Open(filepath.Join(dir, "files"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blobs.Close()
 	server := httptest.NewUnstartedServer(nil)
 	origin := "http://" + server.Listener.Addr().String()
-	server.Config.Handler = httpapi.New(db, origin, web.Files)
+	server.Config.Handler = httpapi.New(db, blobs, origin, web.Files)
 	server.Start()
 	defer server.Close()
 	client := server.Client()

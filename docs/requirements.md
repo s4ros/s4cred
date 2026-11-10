@@ -1,6 +1,6 @@
 # s4cred — Requirements and Application Design
 
-**Status:** Released as version 1.1.0. New notes use short links. Unread version 1.0.0 links remain readable.
+**Status:** Released as version 1.2.0. New notes use short links. A link carries text or one file.
 
 ## 1. Goal
 
@@ -31,12 +31,12 @@ The product limits and expiration choices are agreed in section 2. The following
 
 | Parameter | Default |
 | --- | --- |
-| Maximum request size | 1,400,000 bytes for the base64url-encoded ciphertext and JSON metadata |
+| Maximum request size | 1,400,000 bytes for text and other routes; `POST /api/files` accepts 33,562,644 bytes |
 | Expired note cleanup | On startup and every 60 seconds while running |
 | Additional password | No enforced minimum in the first version; recommend a hard-to-guess password of at least 12 characters |
 | Password strengthening | PBKDF2-HMAC-SHA-256, 600,000 iterations, random 128-bit salt |
 
-The note limit is measured in UTF-8 bytes, not characters. AES-GCM adds a 16-byte tag, and base64url encoding expands the maximum ciphertext to 1,333,355 characters; the request limit also leaves room for JSON metadata. The active ciphertext byte limit is enforced independently of the note-count limit.
+The note limit is measured in UTF-8 bytes, not characters. AES-GCM adds a 16-byte tag, and base64url encoding expands the maximum ciphertext to 1,333,355 characters; the request limit also leaves room for JSON metadata. The maximum plaintext file is 33,554,432 bytes. Its ciphertext is that length plus the 16-byte tag, and the upload frame may be as large as 33,562,644 bytes. The active ciphertext byte limit is enforced independently of the note-count limit.
 
 ## 4. Functionality
 
@@ -83,7 +83,8 @@ Deletion occurs before the data is delivered and decrypted. A dropped connection
 
 - Accounts, login, listing notes, an administration panel, and history.
 - Multiple reads, editing, manual revocation, and note recovery.
-- Attachments, HTML/Markdown formatting, email, and messaging integrations.
+- HTML/Markdown formatting, email, and messaging integrations.
+- More than one file, a file plus text, inline preview, resumable uploads, and server-side keys.
 - Notifications and per-note custom domains.
 - Clustering, replication, and multiple application instances sharing a SQLite file.
 
@@ -108,6 +109,8 @@ The repository will include separate, clearly documented examples for Nginx, Tra
 - Random 96-bit nonce, stored as a SQLite BLOB.
 - Expiration timestamp.
 - For short links only, `link_secret`: the sealed key package described in section 7.1. Version 1.0.0 rows leave it NULL. It is not counted toward the ciphertext quota.
+- A text row leaves `file_id`, `file_nonce`, and `file_size` NULL. A file row sets all three: `file_id` is 16 random bytes, `file_nonce` is the 12-byte nonce for the file ciphertext, and `file_size` is that ciphertext's length, from 17 to 33,554,448 bytes. The file bytes are not a SQLite BLOB. They are a separate object named with the lowercase hex of `file_id`. On a file row, the `ciphertext` column holds the metadata ciphertext (the encrypted name and media type), from 17 to 4,112 bytes. `file_size` counts toward the active ciphertext quota together with the length of `ciphertext`.
+- The `deliveries` table records a file after it is consumed and before cleanup removes the object. Its columns are `file_id` (primary key) and `delete_after`. `delete_after` is the store clock plus 180 seconds, written in the same transaction that deletes the note.
 
 The database does not store plaintext, passwords, unsealed encryption keys, raw read tokens, raw short codes, or complete links. Short-link rows store the sealed package from section 7.1. The server hashes the identifier received in a request for lookup; it does not need to store the original identifier persistently.
 
@@ -122,8 +125,9 @@ The read uses a SQLite write transaction: prevent concurrent writes, obtain the 
 | `GET /` | Note creation interface | HTML; does not change data |
 | `GET /n/{id}` | Note reading interface | HTML; does not fetch or delete the note |
 | `POST /api/notes` | Validates and stores `ciphertext`, `nonce`, `ttl`, `read_token_hash`, `id_hash`, and `link_secret` | `201` with `{"ok": true}`; data, capacity, or availability errors. The response does not contain the code |
-| `POST /api/notes/{code}/material` | Returns the sealed package for a live short link. Does not delete | `200` with `link_secret`, or a general `404` |
-| `POST /api/notes/{id}/consume` | Validates `read_token` and atomically deletes and returns a valid note. `{id}` may be a short code or a legacy 32-byte identifier | `200` with `ciphertext` and `nonce`, or a general `404` |
+| `POST /api/files` | Validates an upload frame and stores one encrypted file. The content type is `application/vnd.s4cred.upload` with no parameters. The body is at most 33,562,644 bytes: a 4-byte length, JSON metadata, then the raw file ciphertext. The file and its name are encrypted in the browser | `201` with `{"ok": true}`; data, capacity, or availability errors. The response does not contain the code or the file id |
+| `POST /api/notes/{code}/material` | Returns the sealed package for a live short link. Does not delete the note. A file row also returns a `file` object with the metadata `ciphertext` and `nonce`, and does not return file bytes | `200` with `link_secret`, plus `file` for a file row, or a general `404` |
+| `POST /api/notes/{id}/consume` | Validates `read_token` and atomically deletes and returns a valid note. `{id}` may be a short code or a legacy 32-byte identifier. A file row is deleted and delivered only when the body also sets `accept_file` to true; without that flag the row is not deleted. A text row is consumed whether or not `accept_file` is present | `200` with `ciphertext` and `nonce` for text, or `application/vnd.s4cred.payload` for an accepted file, or a general `404` |
 
 Binary JSON values use unpadded base64url. `read_token_hash` is the SHA-256 digest of the 32 raw read-token bytes; both the decoded digest and decoded `read_token` must be exactly 32 bytes. The raw read token is sent only in the JSON body of a confirmed consume request, never in the URL; it is not persistently stored or logged. A syntactically valid consume request with a missing, invalid, or incorrect token receives the same general `404` as a missing, expired, or consumed note; malformed JSON may receive `400`.
 
@@ -168,7 +172,7 @@ For a 1,000,000-byte note, the AES-GCM ciphertext is 1,000,016 bytes, before bas
 
 - A multi-stage Go build produces the application binary; the runtime container runs it as a non-root user and contains only what is needed at runtime.
 - One application process handles concurrent requests with a single cleanup task; the database is on a named volume writable by the container user.
-- Database operations, including pool and SQLite lock waits, have a 10-second context deadline. The application has 30-second request-read and 60-second response-write timeouts; uninterruptible filesystem stalls and network failures after a commit can still prevent delivery.
+- Database operations, including pool and SQLite lock waits, have a 10-second context deadline. The application has 120-second request-read and 120-second response-write timeouts; uninterruptible filesystem stalls and network failures after a commit can still prevent delivery.
 - Container and reverse proxy examples bind the application port to localhost by default rather than exposing it directly to the Internet.
 - Configuration includes at least the public origin, database path, active-note count limit, and active ciphertext byte limit. User secrets are not server environment variables.
 - Operational documentation covers container replacement, volume access and permissions, capacity monitoring, and failure consequences. A database backup can restore read notes and prolong ciphertext retention: database backups are not recommended for the first version.
@@ -192,3 +196,6 @@ For a 1,000,000-byte note, the AES-GCM ciphertext is 1,000,016 bytes, before bas
 14. The repository contains independently usable, documented Nginx, Traefik, and Caddy examples, with limitations and equivalent security requirements made explicit for each.
 15. Missing, malformed, or incorrect read tokens in syntactically valid requests cannot consume a note and return the same general response as a missing or expired note; a subsequent request with the correct token can consume it exactly once.
 16. A new note yields a 16-character code and no fragment. The database row stores the sealed package and the code's hash, not the raw code. `GET /n/{code}` and material retrieval do not consume the note. Confirming consumes it once. A version 1.0.0 fragment link still opens. A wrong password on a short link sends no consume request.
+17. A file larger than 33,554,432 bytes, an empty file, a name longer than 255 UTF-8 bytes, a foreign `Origin`, a malformed upload frame, and a file nonce equal to the metadata nonce are rejected. A file of exactly 33,554,432 bytes can be created and downloaded.
+18. A consume request for a file that does not set `accept_file` to true does not delete it. A later request with the valid read token and `accept_file` set to true delivers the file once.
+19. The Nginx, Traefik, and Caddy examples allow a body of 33,562,644 bytes only on `/api/files` and keep 1,400,000 bytes on other routes.

@@ -2,12 +2,54 @@ const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
 const fs = require('node:fs/promises');
 const http = require('node:http');
+const https = require('node:https');
 const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
 const { domain, examples, command, listen, close, unusedPort, request, waitForProxy, configure, certificate } = require('./fixtures.cjs');
 
 const maxBody = 1_400_000;
+
+// Traefik rejects from Content-Length and resets a socket that still holds the
+// unread body, which hides the 413 if the body is written immediately.
+// Expect: 100-continue lets that status arrive before the body is sent.
+function limitedFileRequest(port, ca, body) {
+  return new Promise((resolve, reject) => {
+    let status;
+    let settled = false;
+    const chunks = [];
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      if (err && !status) reject(err);
+      else resolve({ status, body: Buffer.concat(chunks).toString() });
+    };
+    const req = https.request({
+      host: '127.0.0.1', port, servername: domain, ca,
+      path: '/api/files', method: 'POST', agent: false,
+      headers: {
+        Host: domain,
+        'Content-Type': 'application/json',
+        'Content-Length': body.length,
+        Expect: '100-continue',
+      },
+    }, (res) => {
+      status = res.statusCode;
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => finish());
+      res.on('error', (err) => finish(err));
+    });
+    req.setTimeout(10_000, () => finish(new Error('HTTPS request timed out')));
+    req.on('error', (err) => finish(err));
+    let sent = false;
+    req.on('continue', () => {
+      if (sent || status) return;
+      sent = true;
+      req.end(body);
+    });
+    req.flushHeaders();
+  });
+}
 
 for (const example of examples) {
   test(`${example.name}: HTTPS proxy integration`, { timeout: 240_000 }, async (t) => {
@@ -86,6 +128,14 @@ for (const example of examples) {
       const oversized = await request(proxyPort, ca, { url: '/api/notes', body: Buffer.alloc(maxBody + 1, 120) });
       assert.equal(oversized.status, 413, 'body above the limit is rejected');
       assert.ok(!seen.some((entry) => entry.url === '/api/notes' && entry.bytes > maxBody), 'oversized body did not reach the upstream in full');
+
+      const fileMax = 33_562_644;
+      const fileExact = await request(proxyPort, ca, { url: '/api/files', body: Buffer.alloc(fileMax, 120) });
+      assert.equal(fileExact.status, 200, 'file body exactly at the limit is allowed');
+      assert.equal(fileExact.body, String(fileMax), 'the complete file body reached the upstream');
+      const fileOversized = await limitedFileRequest(proxyPort, ca, Buffer.alloc(fileMax + 1, 120));
+      assert.equal(fileOversized.status, 413, 'file body above the limit is rejected');
+      assert.ok(!seen.some((entry) => entry.url === '/api/files' && entry.bytes > fileMax), 'oversized file body did not reach the upstream in full');
 
       let failed;
       try {

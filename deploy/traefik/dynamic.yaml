@@ -1,5 +1,12 @@
 http:
   routers:
+    files:
+      rule: "Host(`notes.example.com`) && Path(`/api/files`)"
+      entryPoints: [websecure]
+      priority: 40
+      tls: {}
+      middlewares: [privacy, file-body-limit, concurrent, create-rate]
+      service: app
     create:
       rule: "Host(`notes.example.com`) && Path(`/api/notes`)"
       entryPoints: [websecure]
@@ -42,6 +49,10 @@ http:
       buffering:
         maxRequestBodyBytes: 1400000
         memRequestBodyBytes: 1400000
+    file-body-limit:
+      buffering:
+        maxRequestBodyBytes: 33562644
+        memRequestBodyBytes: 65536
     concurrent:
       inFlightReq:
         amount: 20
@@ -62,7 +73,7 @@ http:
     app-transport:
       forwardingTimeouts:
         dialTimeout: 5s
-        responseHeaderTimeout: 30s
+        responseHeaderTimeout: 120s
         idleConnTimeout: 30s
   services:
     app:

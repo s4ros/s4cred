@@ -19,8 +19,8 @@ entryPoints:
         allowEncodedHash: false
     transport:
       respondingTimeouts:
-        readTimeout: 30s
-        writeTimeout: 60s
+        readTimeout: 120s
+        writeTimeout: 120s
         idleTimeout: 30s
 providers:
   file:

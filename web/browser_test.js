@@ -338,6 +338,88 @@ const harness = String.raw`
     await waitFor(() => !el(doc, 'opened').hidden, 'maximum read');
     assert(el(doc, 'opened-note').textContent.length === 1000000, 'maximum note round trip');
 
+    doc = await open('/');
+    const fileRadio = doc.querySelector('input[name="payload"][value="file"]');
+    assert(fileRadio, 'file radio');
+    fileRadio.checked = true;
+    fileRadio.dispatchEvent(new Event('change', { bubbles: true }));
+    const rawName = 'secret/' + String.fromCharCode(0x202E) + 'report.pdf';
+    const safeName = 'report.pdf';
+    const sample = new frame.contentWindow.File(['hello file'], rawName, { type: 'application/pdf' });
+    assert(sample.name === rawName, 'metadata name keeps the path and bidi mark: ' + sample.name);
+    const sampleTransfer = new frame.contentWindow.DataTransfer();
+    sampleTransfer.items.add(sample);
+    el(doc, 'file').files = sampleTransfer.files;
+    el(doc, 'file').dispatchEvent(new Event('change', { bubbles: true }));
+    click(doc, 'create-button');
+    await waitFor(() => !el(doc, 'created').hidden || !el(doc, 'create-error').hidden, 'file creation');
+    assert(!el(doc, 'created').hidden, 'file creation failed: ' + el(doc, 'create-error').textContent);
+    const fileLink = el(doc, 'link').value;
+    assert(/^https?:\/\/[^/]+\/n\/[0-9a-hjkmnp-tv-z]{16}$/.test(fileLink), 'file link format');
+    const fileCreated = (await stats()).calls.filter((call) => call.type === 'create').pop();
+    const consumesBeforeFile = (await stats()).consumes;
+    doc = await open(fileLink);
+    await waitFor(() => !el(doc, 'file-summary').hidden && el(doc, 'file-summary').textContent.length > 0, 'file summary');
+    assert(el(doc, 'file-summary').textContent === safeName + ' · 10 bytes', 'pre-confirm summary shows sanitized name and exact size, got ' + el(doc, 'file-summary').textContent);
+    assert(el(doc, 'file-summary').textContent.indexOf(rawName) === -1, 'pre-confirm summary hides the raw name');
+    assert((await stats()).consumes === consumesBeforeFile, 'file summary does not consume');
+    const downloads = [];
+    const payloads = [];
+    const anchorClick = frame.contentWindow.HTMLAnchorElement.prototype.click;
+    frame.contentWindow.HTMLAnchorElement.prototype.click = function () {
+      if (this.download) downloads.push({ name: this.download, href: this.href });
+      return anchorClick.call(this);
+    };
+    const pageFetch = frame.contentWindow.fetch.bind(frame.contentWindow);
+    frame.contentWindow.fetch = async function (...args) {
+      const response = await pageFetch(...args);
+      if (String(args[0] || '').indexOf('/consume') !== -1) {
+        const copy = response.clone();
+        payloads.push({ type: copy.headers.get('content-type'), bytes: new Uint8Array(await copy.arrayBuffer()) });
+      }
+      return response;
+    };
+    click(doc, 'read-button');
+    await waitFor(() => !el(doc, 'opened-file').hidden || !el(doc, 'read-error').hidden, 'file read');
+    assert(!el(doc, 'opened-file').hidden, 'file ready view: ' + el(doc, 'read-error').textContent);
+    assert(el(doc, 'file-download-status').textContent === safeName + ' · 10 bytes', 'opened file shows sanitized name and exact size, got ' + el(doc, 'file-download-status').textContent);
+    assert(el(doc, 'opened-file').textContent.indexOf(rawName) === -1 && el(doc, 'download-file').textContent.length > 0, 'opened file hides the raw name and keeps Download');
+    assert(downloads.length === 1 && downloads[0].name === safeName, 'download anchor invoked');
+    assert(payloads.length === 1 && String(payloads[0].type || '').indexOf('application/vnd.s4cred.payload') !== -1, 'payload content type');
+    const packed = payloads[0].bytes;
+    const packedLength = new DataView(packed.buffer, packed.byteOffset, packed.byteLength).getUint32(0);
+    assert(packedLength > 0 && 4 + packedLength <= packed.length, 'payload header length');
+    const packedHead = JSON.parse(new TextDecoder().decode(packed.subarray(4, 4 + packedLength)));
+    const packedTail = packed.subarray(4 + packedLength);
+    const sealedFileKey = await unseal(new URL(fileLink).pathname.slice(3), decode64(fileCreated.body.link_secret));
+    assert(sealedFileKey.length === 64, 'sealed file key');
+    const fileKey = await crypto.subtle.importKey('raw', sealedFileKey.slice(0, 32), { name:'AES-GCM' }, false, ['decrypt']);
+    const decryptedFile = new Uint8Array(await crypto.subtle.decrypt({ name:'AES-GCM', iv: decode64(packedHead.file_nonce), additionalData: new TextEncoder().encode('s4cred-file-body-v1') }, fileKey, packedTail));
+    assert(new TextDecoder().decode(decryptedFile) === 'hello file', 'decrypted file bytes');
+    doc = await open(fileLink);
+    await waitFor(() => el(doc, 'read-error').dataset.message === 'notFound', 'second file open');
+    assert(el(doc, 'read-error').dataset.message === 'notFound', 'second file open unavailable');
+
+    doc = await open('/');
+    const bigRadio = doc.querySelector('input[name="payload"][value="file"]');
+    bigRadio.checked = true;
+    bigRadio.dispatchEvent(new Event('change', { bubbles: true }));
+    const bigFile = new frame.contentWindow.File([new frame.contentWindow.Uint8Array(33554433)], 'too-big.bin');
+    const bigTransfer = new frame.contentWindow.DataTransfer();
+    bigTransfer.items.add(bigFile);
+    el(doc, 'file').files = bigTransfer.files;
+    el(doc, 'file').dispatchEvent(new Event('change', { bubbles: true }));
+    const beforeBigFile = (await stats()).creates;
+    click(doc, 'create-button');
+    assert(el(doc, 'create-error').dataset.message === 'fileTooLarge' && (await stats()).creates === beforeBigFile, 'oversize file rejected without request');
+
+    doc = await open('/');
+    const textLink = await create(doc, 'Plain note still works');
+    doc = await open(textLink);
+    click(doc, 'read-button');
+    await waitFor(() => !el(doc, 'opened').hidden || !el(doc, 'read-error').hidden, 'text read after file mode');
+    assert(!el(doc, 'opened').hidden && el(doc, 'opened-note').textContent === 'Plain note still works', 'text create and read still works');
+
     const beforeInvalid = (await stats()).consumes;
     doc = await open(new URL(largeLink).pathname + '#v1.bad.bad');
     assert(el(doc, 'read-button').disabled && el(doc, 'read-error').dataset.message === 'invalidLink', 'invalid link blocked');
@@ -359,6 +441,14 @@ function readBody(request) {
     request.setEncoding("utf8");
     request.on("data", (chunk) => { body += chunk; });
     request.on("end", () => resolve(body));
+    request.on("error", reject);
+  });
+}
+function readRaw(request) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    request.on("data", (chunk) => { chunks.push(chunk); });
+    request.on("end", () => resolve(Buffer.concat(chunks)));
     request.on("error", reject);
   });
 }
@@ -391,6 +481,24 @@ const server = http.createServer(async (request, response) => {
       notes.set(body.id_hash, body);
       return json(response, 201, { ok: true });
     }
+    if (request.method === "POST" && pathname === "/api/files") {
+      const raw = await readRaw(request);
+      if (raw.length < 4) return json(response, 400, { error: "invalid_note" });
+      const headerLen = raw.readUInt32BE(0);
+      if (headerLen < 1 || headerLen > 8192 || raw.length < 4 + headerLen) return json(response, 400, { error: "invalid_note" });
+      let header;
+      try { header = JSON.parse(raw.subarray(4, 4 + headerLen).toString("utf8")); }
+      catch (_) { return json(response, 400, { error: "invalid_note" }); }
+      const tail = Buffer.from(raw.subarray(4 + headerLen));
+      if (!header || typeof header !== "object" || !header.id_hash || !header.link_secret || !header.file_nonce || header.file_size !== tail.length) {
+        return json(response, 400, { error: "invalid_note" });
+      }
+      const stored = Object.assign({}, header);
+      stored.tail = tail;
+      notes.set(header.id_hash, stored);
+      calls.push({ type: "create", body: header });
+      return json(response, 201, { ok: true });
+    }
     function noteKey(id) {
       const code = decodeURIComponent(id).toLowerCase();
       if (/^[0-9a-hjkmnp-tv-z]{16}$/.test(code)) return crypto.createHash("sha256").update(code).digest("base64url");
@@ -402,16 +510,29 @@ const server = http.createServer(async (request, response) => {
       calls.push({ type: "material" });
       const note = noteFor(material[1]);
       if (!note || !note.link_secret) return json(response, 404, { error: "not_found" });
-      return json(response, 200, { link_secret: note.link_secret });
+      const payload = { link_secret: note.link_secret };
+      if (note.file_nonce) payload.file = { ciphertext: note.ciphertext, nonce: note.nonce };
+      return json(response, 200, payload);
     }
     const consume = /^\/api\/notes\/([^/]+)\/consume$/.exec(pathname);
     if (request.method === "POST" && consume) {
       const body = JSON.parse(await readBody(request));
       calls.push({ type: "consume", body });
-      const note = noteFor(consume[1]);
+      const key = noteKey(consume[1]);
+      const note = notes.get(key) || null;
       const hash = crypto.createHash("sha256").update(Buffer.from(body.read_token, "base64url")).digest("base64url");
       if (!note || hash !== note.read_token_hash) return json(response, 404, { error: "not_found" });
-      notes.delete(noteKey(consume[1]));
+      if (note.file_nonce && body.accept_file !== true) return json(response, 404, { error: "not_found" });
+      notes.delete(key);
+      if (note.file_nonce) {
+        const head = Buffer.from(JSON.stringify({ ciphertext: note.ciphertext, nonce: note.nonce, file_nonce: note.file_nonce, file_size: note.tail.length }));
+        const frame = Buffer.alloc(4 + head.length + note.tail.length);
+        frame.writeUInt32BE(head.length, 0);
+        head.copy(frame, 4);
+        note.tail.copy(frame, 4 + head.length);
+        response.writeHead(200, { "Content-Type": "application/vnd.s4cred.payload", "Cache-Control": "no-store" });
+        return response.end(frame);
+      }
       return json(response, 200, { ciphertext: note.ciphertext, nonce: note.nonce });
     }
     const asset = pathname === "/" || pathname.startsWith("/n/") ? "index.html" : pathname.slice(1);

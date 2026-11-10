@@ -61,15 +61,15 @@ func TestConsumeAndStoredFields(t *testing.T) {
 		t.Fatalf("secure_delete = %d, error %v", secureDelete, err)
 	}
 	for _, wrong := range [][]byte{nil, bytes.Repeat([]byte{0x56}, 32), token[:31]} {
-		if _, _, err := s.Consume(context.Background(), idRaw, wrong); !errors.Is(err, ErrNotFound) {
+		if _, err := s.Consume(context.Background(), idRaw, wrong, false); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("wrong token: %v", err)
 		}
 	}
-	got, gotNonce, err := s.Consume(context.Background(), idRaw, token)
-	if err != nil || !bytes.Equal(got, ciphertext) || !bytes.Equal(gotNonce, nonce) {
+	got, err := s.Consume(context.Background(), idRaw, token, false)
+	if err != nil || !bytes.Equal(got.Ciphertext, ciphertext) || !bytes.Equal(got.Nonce, nonce) {
 		t.Fatalf("consume: %v", err)
 	}
-	if _, _, err = s.Consume(context.Background(), idRaw, token); !errors.Is(err, ErrNotFound) {
+	if _, err = s.Consume(context.Background(), idRaw, token, false); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second consume: %v", err)
 	}
 }
@@ -85,11 +85,11 @@ func TestExpirationCleanupAndCapacity(t *testing.T) {
 		t.Fatalf("expected capacity: %v", err)
 	}
 	now = now.Add(time.Hour)
-	if _, _, err := s.Consume(context.Background(), idBytes(t, id), token); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Consume(context.Background(), idBytes(t, id), token, false); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expired read: %v", err)
 	}
 	create(t, s, token, 17, 86400)
-	if err := s.Cleanup(context.Background()); err != nil {
+	if _, err := s.Cleanup(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	var count int
@@ -130,13 +130,13 @@ func TestCreateSealedHidesCodeAndMaterialDoesNotConsume(t *testing.T) {
 		t.Fatal("stored row exposed the raw short code or did not keep the sealed blob")
 	}
 	got, err := s.Material(context.Background(), code)
-	if err != nil || !bytes.Equal(got, blob) {
-		t.Fatalf("material: %v", err)
+	if err != nil || !bytes.Equal(got.LinkSecret, blob) || got.Meta != nil || got.Nonce != nil {
+		t.Fatalf("material: %+v %v", got, err)
 	}
 	if _, err = s.Material(context.Background(), code); err != nil {
 		t.Fatalf("second material consumed the note: %v", err)
 	}
-	if _, _, err = s.Consume(context.Background(), code, token); err != nil {
+	if _, err = s.Consume(context.Background(), code, token, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = s.Material(context.Background(), code); !errors.Is(err, ErrNotFound) {
@@ -154,7 +154,7 @@ func TestCreateSealedHidesCodeAndMaterialDoesNotConsume(t *testing.T) {
 	if _, err = s.Material(context.Background(), code); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("legacy material: %v", err)
 	}
-	if _, _, err = s.Consume(context.Background(), legacyID, legacyToken); err != nil {
+	if _, err = s.Consume(context.Background(), legacyID, legacyToken, false); err != nil {
 		t.Fatalf("legacy consume: %v", err)
 	}
 	if _, err = s.Material(context.Background(), []byte("short")); !errors.Is(err, ErrNotFound) {
@@ -259,7 +259,7 @@ func TestConcurrentConsume(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _, err := s.Consume(context.Background(), id, token)
+			_, err := s.Consume(context.Background(), id, token, false)
 			switch {
 			case err == nil:
 				success.Add(1)
@@ -319,7 +319,7 @@ func TestPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if _, _, err := s.Consume(context.Background(), id, token); err != nil {
+	if _, err := s.Consume(context.Background(), id, token, false); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -384,12 +384,12 @@ func TestWriteLockTimeoutPrecedesClock(t *testing.T) {
 		name string
 		run  func() error
 	}{
-		{"consume", func() error { _, _, err := s.Consume(context.Background(), id, token); return err }},
+		{"consume", func() error { _, err := s.Consume(context.Background(), id, token, false); return err }},
 		{"create", func() error {
 			_, err := s.Create(context.Background(), make([]byte, 17), make([]byte, 12), hash[:], 3600)
 			return err
 		}},
-		{"cleanup", func() error { return s.Cleanup(context.Background()) }},
+		{"cleanup", func() error { _, err := s.Cleanup(context.Background()); return err }},
 	} {
 		t.Run(op.name, func(t *testing.T) {
 			clockCalls.Store(0)
@@ -432,7 +432,7 @@ func TestConsumeExpiresWhileWaitingForWriteLock(t *testing.T) {
 	lockWriter(t, other)
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := s.Consume(context.Background(), id, token)
+		_, err := s.Consume(context.Background(), id, token, false)
 		done <- err
 	}()
 	waitForStoreConnection(t, s.db, done)
@@ -486,7 +486,7 @@ func TestCleanupTimeAfterWaitingForWriteLock(t *testing.T) {
 	create(t, s, make([]byte, 32), 17, 3600)
 	lockWriter(t, other)
 	done := make(chan error, 1)
-	go func() { done <- s.Cleanup(context.Background()) }()
+	go func() { _, err := s.Cleanup(context.Background()); done <- err }()
 	waitForStoreConnection(t, s.db, done)
 	clock.Store(start.Add(time.Hour).UnixNano())
 	unlockWriter(t, other)
@@ -519,7 +519,7 @@ func TestOperationDeadlineWhileWaitingForPool(t *testing.T) {
 	for range consumers {
 		go func() {
 			<-start
-			_, _, err := s.Consume(context.Background(), id, token)
+			_, err := s.Consume(context.Background(), id, token, false)
 			results <- err
 		}()
 	}
@@ -552,7 +552,7 @@ func TestOperationDeadlineWhileWaitingForPool(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT count(*) FROM notes`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("timed-out creates changed database: count %d, error %v", count, err)
 	}
-	if _, _, err := s.Consume(context.Background(), id, token); err != nil {
+	if _, err := s.Consume(context.Background(), id, token, false); err != nil {
 		t.Fatalf("timed-out reads consumed the note: %v", err)
 	}
 }
@@ -568,7 +568,7 @@ func TestOperationDeadlineWithExternalWriter(t *testing.T) {
 	started := time.Now()
 	for range n {
 		go func() {
-			_, _, err := s.Consume(context.Background(), id, token)
+			_, err := s.Consume(context.Background(), id, token, false)
 			results <- err
 		}()
 	}
@@ -586,7 +586,7 @@ func TestOperationDeadlineWithExternalWriter(t *testing.T) {
 		t.Fatalf("operations took %v", elapsed)
 	}
 	unlockWriter(t, other)
-	if _, _, err := s.Consume(context.Background(), id, token); err != nil {
+	if _, err := s.Consume(context.Background(), id, token, false); err != nil {
 		t.Fatalf("timed-out reads consumed the note: %v", err)
 	}
 }
@@ -624,7 +624,7 @@ func TestCommitDeadlineRollsBackMutation(t *testing.T) {
 		t.Fatalf("blocked commit: %v after %v", err, time.Since(started))
 	}
 	unlockWriter(t, other)
-	if _, _, err := s.Consume(context.Background(), id, token); err != nil {
+	if _, err := s.Consume(context.Background(), id, token, false); err != nil {
 		t.Fatalf("timed-out commit deleted note: %v", err)
 	}
 }
@@ -642,7 +642,7 @@ func TestOperationsRollBackWhenCommitTimesOut(t *testing.T) {
 	if err := other.QueryRowContext(context.Background(), `SELECT count(*) FROM notes`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("reader lock setup: count %d, error %v", count, err)
 	}
-	if _, _, err := s.Consume(context.Background(), id, token); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := s.Consume(context.Background(), id, token, false); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("consume with blocked commit: %v", err)
 	}
 	if _, err := s.Create(context.Background(), make([]byte, 17), make([]byte, 12), hash[:], 3600); !errors.Is(err, context.DeadlineExceeded) {
@@ -652,7 +652,7 @@ func TestOperationsRollBackWhenCommitTimesOut(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT count(*) FROM notes`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("timed-out create persisted: count %d, error %v", count, err)
 	}
-	if _, _, err := s.Consume(context.Background(), id, token); err != nil {
+	if _, err := s.Consume(context.Background(), id, token, false); err != nil {
 		t.Fatalf("timed-out consume persisted: %v", err)
 	}
 }
@@ -675,7 +675,7 @@ func TestCancellationAfterWriteLockDoesNotMutate(t *testing.T) {
 			done := make(chan error, 1)
 			go func() {
 				if operation == "consume" {
-					_, _, err := s.Consume(ctx, id, token)
+					_, err := s.Consume(ctx, id, token, false)
 					done <- err
 					return
 				}
@@ -693,9 +693,64 @@ func TestCancellationAfterWriteLockDoesNotMutate(t *testing.T) {
 			if err := s.db.QueryRow(`SELECT count(*) FROM notes`).Scan(&count); err != nil || count != 1 {
 				t.Fatalf("canceled operation changed database: count %d, error %v", count, err)
 			}
-			if _, _, err := s.Consume(context.Background(), id, token); err != nil {
+			if _, err := s.Consume(context.Background(), id, token, false); err != nil {
 				t.Fatalf("canceled operation consumed note: %v", err)
 			}
 		})
+	}
+}
+
+func TestCreateFileConsumeAndQuota(t *testing.T) {
+	s := newStore(t, 2, 100)
+	now := time.Unix(1_700_000_000, 0)
+	s.now = func() time.Time { return now }
+	code := []byte("0123456789abcdef")
+	idHash := sha256.Sum256(code)
+	token := bytes.Repeat([]byte{0x55}, 32)
+	tokenHash := sha256.Sum256(token)
+	meta := bytes.Repeat([]byte{0x71}, 17)
+	nonce := bytes.Repeat([]byte{0x34}, 12)
+	fileNonce := bytes.Repeat([]byte{0x56}, 12)
+	fileID := bytes.Repeat([]byte{0x77}, 16)
+	secret := sealedBlob(0)
+	if err := s.CreateFile(context.Background(), idHash[:], secret, meta, nonce, tokenHash[:], fileID, fileNonce, 83, 3600); err != nil {
+		t.Fatal(err)
+	}
+	var storedName []byte
+	if err := s.db.QueryRow(`SELECT file_id FROM notes`).Scan(&storedName); err != nil || !bytes.Equal(storedName, fileID) {
+		t.Fatalf("file id: %v", err)
+	}
+	got, err := s.Material(context.Background(), code)
+	if err != nil || !bytes.Equal(got.LinkSecret, secret) || !bytes.Equal(got.Meta, meta) || !bytes.Equal(got.Nonce, nonce) {
+		t.Fatalf("material: %+v %v", got, err)
+	}
+	if _, err := s.Consume(context.Background(), code, token, false); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("acceptFile false deleted or returned the file: %v", err)
+	}
+	if _, err := s.Material(context.Background(), code); err != nil {
+		t.Fatalf("file consumed without acceptFile: %v", err)
+	}
+	secretOut, err := s.Consume(context.Background(), code, token, true)
+	if err != nil || !bytes.Equal(secretOut.FileID, fileID) || !bytes.Equal(secretOut.FileNonce, fileNonce) || secretOut.FileSize != 83 || !bytes.Equal(secretOut.Ciphertext, meta) {
+		t.Fatalf("consume file: %+v %v", secretOut, err)
+	}
+	var deliveries int
+	if err := s.db.QueryRow(`SELECT count(*) FROM deliveries`).Scan(&deliveries); err != nil || deliveries != 1 {
+		t.Fatalf("deliveries %d: %v", deliveries, err)
+	}
+	if _, err := s.Consume(context.Background(), code, token, true); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("second file consume: %v", err)
+	}
+	if err := s.ForgetDelivery(context.Background(), fileID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT count(*) FROM deliveries`).Scan(&deliveries); err != nil || deliveries != 0 {
+		t.Fatalf("delivery remained %d: %v", deliveries, err)
+	}
+	if err := s.CreateFile(context.Background(), idHash[:], secret, meta, nonce, tokenHash[:], fileID, fileNonce, 84, 3600); !errors.Is(err, ErrCapacity) {
+		t.Fatalf("quota: %v", err)
+	}
+	if err := s.CreateFile(context.Background(), idHash[:], secret, meta, nonce, tokenHash[:], fileID, nonce, 17, 3600); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("equal nonces: %v", err)
 	}
 }
