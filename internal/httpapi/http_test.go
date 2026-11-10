@@ -6,11 +6,13 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -19,6 +21,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/s4ros/s4cred/internal/blob"
 	"github.com/s4ros/s4cred/internal/store"
 )
 
@@ -26,16 +29,28 @@ const origin = "https://notes.example"
 
 func setup(t *testing.T, count, size int64) http.Handler {
 	t.Helper()
-	s, err := store.Open(filepath.Join(t.TempDir(), "notes.db"), count, size)
+	handler, _ := setupIn(t, count, size)
+	return handler
+}
+
+func setupIn(t *testing.T, count, size int64) (http.Handler, string) {
+	t.Helper()
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "notes.db"), count, size)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	return New(s, origin, fstest.MapFS{
+	blobs, err := blob.Open(filepath.Join(dir, "files"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = blobs.Close() })
+	return New(s, blobs, origin, fstest.MapFS{
 		"index.html": &fstest.MapFile{Data: []byte("index")},
 		"app.js":     &fstest.MapFile{Data: []byte("script")},
 		"style.css":  &fstest.MapFile{Data: []byte("style")},
-	})
+	}), dir
 }
 
 func enc(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
@@ -383,7 +398,12 @@ func TestConcurrentCanceledConsumesDoNotDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	h := New(s, origin, fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("index")}})
+	blobs, err := blob.Open(filepath.Join(filepath.Dir(path), "files"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = blobs.Close() })
+	h := New(s, blobs, origin, fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("index")}})
 	token := make([]byte, 32)
 	id := createNote(t, h, make([]byte, 17), make([]byte, 12), token, 3600)
 	other, err := sql.Open("sqlite", path)
@@ -441,7 +461,12 @@ func TestExpiredAndMissingHaveSameResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	h := New(s, origin, fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("index")}})
+	blobs, err := blob.Open(filepath.Join(filepath.Dir(path), "files"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = blobs.Close() })
+	h := New(s, blobs, origin, fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("index")}})
 	token := make([]byte, 32)
 	id := createNote(t, h, make([]byte, 17), make([]byte, 12), token, 3600)
 	other, err := sql.Open("sqlite", path)
@@ -492,7 +517,12 @@ func TestShortLinkMaterialAndLegacyConsume(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	h := New(db, origin, fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("index")}})
+	blobs, err := blob.Open(filepath.Join(filepath.Dir(path), "files"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = blobs.Close() })
+	h := New(db, blobs, origin, fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("index")}})
 	ciphertext, nonce, token := bytes.Repeat([]byte{0xa1}, 17), bytes.Repeat([]byte{0xb2}, 12), bytes.Repeat([]byte{0xc3}, 32)
 	code := "k7hm2pqx9vjw4nrt"
 	body := createBodyFor(t, code, ciphertext, nonce, token, 3600)
@@ -578,4 +608,170 @@ func mapsClone(in map[string]any) map[string]any {
 		out[key] = value
 	}
 	return out
+}
+
+func fileFrame(t *testing.T, code string, meta, nonce, fileNonce, token []byte, fileSize int, raw []byte, ttl int64) []byte {
+	t.Helper()
+	hash := sha256.Sum256(token)
+	idHash := sha256.Sum256([]byte(code))
+	header, err := json.Marshal(map[string]any{
+		"ciphertext": enc(meta), "nonce": enc(nonce), "file_nonce": enc(fileNonce), "file_size": fileSize,
+		"ttl": ttl, "read_token_hash": enc(hash[:]), "id_hash": enc(idHash[:]), "link_secret": enc(testSecret(0)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := make([]byte, 4+len(header)+len(raw))
+	binary.BigEndian.PutUint32(frame[:4], uint32(len(header)))
+	copy(frame[4:], header)
+	copy(frame[4+len(header):], raw)
+	return frame
+}
+
+type neverEnding struct{ b byte }
+
+func (n neverEnding) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = n.b
+	}
+	return len(p), nil
+}
+
+func TestFileUploadAndConsume(t *testing.T) {
+	handler, dir := setupIn(t, 10, 1_000_000)
+	code := nextCode()
+	token := bytes.Repeat([]byte{0x55}, 32)
+	meta := bytes.Repeat([]byte{0x71}, 17)
+	nonce := bytes.Repeat([]byte{0x34}, 12)
+	fileNonce := bytes.Repeat([]byte{0x56}, 12)
+	raw := bytes.Repeat([]byte{0xcd}, 32)
+	frame := fileFrame(t, code, meta, nonce, fileNonce, token, len(raw), raw, 3600)
+	created := request(handler, "POST", "/api/files", string(frame), origin, "application/vnd.s4cred.upload")
+	var createdBody map[string]any
+	if err := json.Unmarshal(created.Body.Bytes(), &createdBody); err != nil || created.Code != 201 || createdBody["ok"] != true {
+		t.Fatalf("create: %d %s %v", created.Code, created.Body.String(), err)
+	}
+	disk, err := os.ReadFile(filepath.Join(dir, "notes.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(disk, []byte("report.pdf")) || bytes.Contains(created.Body.Bytes(), []byte("report.pdf")) {
+		t.Fatal("filename appeared in storage or the response")
+	}
+	material := post(handler, "/api/notes/"+code+"/material", "{}")
+	if material.Code != 200 || !strings.Contains(material.Body.String(), enc(meta)) {
+		t.Fatalf("material: %d %s", material.Code, material.Body.String())
+	}
+	if again := post(handler, "/api/notes/"+code+"/material", "{}"); again.Code != 200 {
+		t.Fatalf("second material: %d", again.Code)
+	}
+	early := post(handler, "/api/notes/"+code+"/consume", `{"read_token":"`+enc(token)+`"}`)
+	if early.Code != 404 {
+		t.Fatalf("consume without accept_file: %d", early.Code)
+	}
+	if again := post(handler, "/api/notes/"+code+"/material", "{}"); again.Code != 200 {
+		t.Fatal("accept_file false consumed the file")
+	}
+	body, _ := json.Marshal(map[string]any{"read_token": enc(token), "accept_file": true})
+	got := post(handler, "/api/notes/"+code+"/consume", string(body))
+	if got.Code != 200 || got.Header().Get("Content-Type") != "application/vnd.s4cred.payload" || got.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("payload: %d %s", got.Code, got.Header().Get("Content-Type"))
+	}
+	if !bytes.HasSuffix(got.Body.Bytes(), raw) {
+		t.Fatal("payload tail is not the ciphertext")
+	}
+	if second := post(handler, "/api/notes/"+code+"/consume", string(body)); second.Code != 404 {
+		t.Fatalf("second consume: %d", second.Code)
+	}
+	text := post(handler, "/api/notes", createBody(t, meta, nonce, token, 3600))
+	if text.Code != 201 {
+		t.Fatalf("text create: %d %s", text.Code, text.Body.String())
+	}
+}
+
+func TestFileUploadRejects(t *testing.T) {
+	handler, _ := setupIn(t, 10, 1_000_000)
+	token := bytes.Repeat([]byte{0x55}, 32)
+	meta := bytes.Repeat([]byte{0x71}, 17)
+	nonce := bytes.Repeat([]byte{0x34}, 12)
+	fileNonce := bytes.Repeat([]byte{0x56}, 12)
+	raw := bytes.Repeat([]byte{0xcd}, 32)
+	valid := fileFrame(t, nextCode(), meta, nonce, fileNonce, token, len(raw), raw, 3600)
+	header8193 := make([]byte, 4+8193)
+	binary.BigEndian.PutUint32(header8193[:4], 8193)
+	shortTail := fileFrame(t, nextCode(), meta, nonce, fileNonce, token, 32, bytes.Repeat([]byte{0xcd}, 31), 3600)
+	extra := append(append([]byte(nil), valid...), 0xff)
+	equal := fileFrame(t, nextCode(), meta, nonce, nonce, token, len(raw), raw, 3600)
+	cases := []struct {
+		name, originValue, contentType string
+		body                           []byte
+		status                         int
+	}{
+		{name: "no origin", contentType: "application/vnd.s4cred.upload", body: valid, status: 403},
+		{name: "json content type", originValue: origin, contentType: "application/json", body: valid, status: 400},
+		{name: "header length 8193", originValue: origin, contentType: "application/vnd.s4cred.upload", body: header8193, status: 400},
+		{name: "short tail", originValue: origin, contentType: "application/vnd.s4cred.upload", body: shortTail, status: 400},
+		{name: "extra byte", originValue: origin, contentType: "application/vnd.s4cred.upload", body: extra, status: 400},
+		{name: "equal nonces", originValue: origin, contentType: "application/vnd.s4cred.upload", body: equal, status: 400},
+		{name: "body cap", originValue: origin, contentType: "application/vnd.s4cred.upload", body: bytes.Repeat([]byte{0x61}, 33_562_645), status: 413},
+	}
+	for _, tc := range cases {
+		w := request(handler, "POST", "/api/files", string(tc.body), tc.originValue, tc.contentType)
+		if w.Code != tc.status {
+			t.Errorf("%s: got %d, want %d (%s)", tc.name, w.Code, tc.status, w.Body.String())
+		}
+	}
+}
+
+func TestFileRoundTripAtLimit(t *testing.T) {
+	handler, _ := setupIn(t, 4, 40_000_000)
+	code := nextCode()
+	token := bytes.Repeat([]byte{0x55}, 32)
+	meta := bytes.Repeat([]byte{0x71}, 17)
+	nonce := bytes.Repeat([]byte{0x34}, 12)
+	fileNonce := bytes.Repeat([]byte{0x56}, 12)
+	const fileSize = 33_554_448
+	prefix := fileFrame(t, code, meta, nonce, fileNonce, token, fileSize, nil, 3600)
+	frame := make([]byte, len(prefix)+fileSize)
+	copy(frame, prefix)
+	if _, err := io.ReadFull(io.LimitReader(neverEnding{0xab}, fileSize), frame[len(prefix):]); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("POST", "/api/files", bytes.NewReader(frame))
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Content-Type", "application/vnd.s4cred.upload")
+	created := httptest.NewRecorder()
+	handler.ServeHTTP(created, req)
+	var createdBody map[string]any
+	if err := json.Unmarshal(created.Body.Bytes(), &createdBody); err != nil || created.Code != 201 || createdBody["ok"] != true {
+		t.Fatalf("create: %d %s %v", created.Code, created.Body.String(), err)
+	}
+	body, err := json.Marshal(map[string]any{"read_token": enc(token), "accept_file": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := post(handler, "/api/notes/"+code+"/consume", string(body))
+	if got.Code != 200 {
+		t.Fatalf("consume: %d %s", got.Code, got.Body.String())
+	}
+	payload := bytes.NewReader(got.Body.Bytes())
+	var lenBuf [4]byte
+	if _, err := io.ReadFull(payload, lenBuf[:]); err != nil {
+		t.Fatal(err)
+	}
+	jsonLen := binary.BigEndian.Uint32(lenBuf[:])
+	if _, err := io.CopyN(io.Discard, payload, int64(jsonLen)); err != nil {
+		t.Fatal(err)
+	}
+	n, err := io.Copy(io.Discard, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != fileSize {
+		t.Fatalf("ciphertext bytes = %d, want %d", n, fileSize)
+	}
+	wantLen := fmt.Sprintf("%d", 4+int(jsonLen)+fileSize)
+	if got.Header().Get("Content-Length") != wantLen {
+		t.Fatalf("Content-Length = %q, want %s", got.Header().Get("Content-Length"), wantLen)
+	}
 }
