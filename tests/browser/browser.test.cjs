@@ -240,6 +240,80 @@ test('password-protected browser flow verifies locally and interoperates with No
   }
 });
 
+test('password-protected file link rejects a wrong password, downloads once, then is gone', { timeout: 120000 }, async () => {
+  const context = await browser.newContext({ locale: 'en-US', acceptDownloads: true });
+  try {
+    const page = await context.newPage();
+    await page.goto(origin);
+    await page.locator('input[name="payload"][value="file"]').check();
+    await page.locator('#file').setInputFiles({
+      name: 'report.pdf',
+      mimeType: 'application/pdf',
+      buffer: Buffer.from('hello file'),
+    });
+    await page.locator('#protect').check();
+    await page.locator('#create-password').fill('correct horse');
+    await page.locator('#confirm-password').fill('correct horse');
+    await page.locator('#create-button').click();
+    await page.locator('#created').waitFor({ state: 'visible' });
+    const link = await page.locator('#link').inputValue();
+    assert.match(link, /\/n\/[0-9a-hjkmnp-tv-z]{16}$/);
+
+    await page.goto(link);
+    await page.locator('#read-password').waitFor({ state: 'visible' });
+    await page.locator('#read-password').fill('wrong password');
+    await page.locator('#read-button').click();
+    await page.locator('#read-error').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#read-error').getAttribute('data-message'), 'wrongPassword');
+
+    const reloaded = await page.reload();
+    assert.equal(reloaded.status(), 200);
+    await page.waitForFunction(() => {
+      const button = document.getElementById('read-button');
+      const error = document.getElementById('read-error');
+      const password = document.getElementById('read-password-field');
+      return button && !button.disabled && password && !password.hidden && error.dataset.message !== 'notFound';
+    });
+
+    await page.locator('#read-password').fill('correct horse');
+    await page.locator('#read-button', { hasText: 'Continue' }).click();
+    await page.locator('#file-summary').waitFor({ state: 'visible' });
+    assert.match(await page.locator('#file-summary').textContent(), /report\.pdf/);
+
+    const downloadPromise = page.waitForEvent('download');
+    await page.locator('#read-button', { hasText: 'Download' }).click();
+    const download = await downloadPromise;
+    assert.equal(fs.readFileSync(await download.path()).toString('utf8'), 'hello file');
+
+    await page.goto(link);
+    await page.locator('#read-error').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#read-error').getAttribute('data-message'), 'notFound');
+  } finally {
+    await context.close();
+  }
+});
+
+test('a file over 32 MiB is rejected on the create page', { timeout: 120000 }, async () => {
+  const context = await browser.newContext({ locale: 'en-US' });
+  try {
+    const page = await context.newPage();
+    await page.goto(origin);
+    await page.locator('input[name="payload"][value="file"]').check();
+    await page.locator('#file').setInputFiles({
+      name: 'big.bin',
+      mimeType: 'application/octet-stream',
+      buffer: Buffer.alloc(33554433),
+    });
+    await page.locator('#create-button').click();
+    await page.locator('#create-error').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#create-error').getAttribute('data-message'), 'fileTooLarge');
+    assert.match(await page.locator('#create-error').textContent(), /32 MiB/);
+    assert.equal(await page.locator('#created').isVisible(), false);
+  } finally {
+    await context.close();
+  }
+});
+
 test('correcting a same-page link fragment uses the corrected credentials', { timeout: 30000 }, async () => {
   const context = await browser.newContext({ locale: 'en-US' });
   try {
