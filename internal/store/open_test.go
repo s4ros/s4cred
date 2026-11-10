@@ -76,7 +76,7 @@ func TestOpenRetriesExclusiveLock(t *testing.T) {
 	}
 	token := make([]byte, 32)
 	id := idBytes(t, create(t, s, token, 17, 3600))
-	if _, _, err := s.Consume(context.Background(), id, token); err != nil {
+	if _, err := s.Consume(context.Background(), id, token, false); err != nil {
 		t.Fatalf("opened store does not work: %v", err)
 	}
 }
@@ -105,7 +105,7 @@ func TestOpenExclusiveLockDeadline(t *testing.T) {
 	defer s.Close()
 	token := make([]byte, 32)
 	id := idBytes(t, create(t, s, token, 17, 3600))
-	if _, _, err := s.Consume(context.Background(), id, token); err != nil {
+	if _, err := s.Consume(context.Background(), id, token, false); err != nil {
 		t.Fatalf("reopened store does not work: %v", err)
 	}
 }

@@ -34,7 +34,7 @@ func run() error {
 		return errors.New("cannot open database")
 	}
 	defer db.Close()
-	if err := db.Cleanup(context.Background()); err != nil {
+	if _, err := db.Cleanup(context.Background()); err != nil {
 		return errors.New("database cleanup failed")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -58,7 +58,7 @@ func run() error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := db.Cleanup(ctx); err != nil && ctx.Err() == nil {
+				if _, err := db.Cleanup(ctx); err != nil && ctx.Err() == nil {
 					log.Print("database cleanup failed")
 				}
 			}

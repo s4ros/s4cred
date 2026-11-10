@@ -228,13 +228,13 @@ func (s *Server) material(w http.ResponseWriter, r *http.Request, body []byte) {
 		writeError(w, http.StatusNotFound, "not_found")
 		return
 	}
-	secret, err := s.store.Material(r.Context(), code)
+	got, err := s.store.Material(r.Context(), code)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found")
 	} else if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error")
 	} else {
-		writeJSON(w, http.StatusOK, map[string]string{"link_secret": base64.RawURLEncoding.EncodeToString(secret)})
+		writeJSON(w, http.StatusOK, map[string]string{"link_secret": base64.RawURLEncoding.EncodeToString(got.LinkSecret)})
 	}
 }
 
@@ -257,15 +257,15 @@ func (s *Server) consume(w http.ResponseWriter, r *http.Request, body []byte) {
 		writeError(w, http.StatusNotFound, "not_found")
 		return
 	}
-	ciphertext, nonce, err := s.store.Consume(r.Context(), id, token)
+	secret, err := s.store.Consume(r.Context(), id, token, false)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found")
 	} else if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error")
 	} else {
 		writeJSON(w, http.StatusOK, map[string]string{
-			"ciphertext": base64.RawURLEncoding.EncodeToString(ciphertext),
-			"nonce":      base64.RawURLEncoding.EncodeToString(nonce),
+			"ciphertext": base64.RawURLEncoding.EncodeToString(secret.Ciphertext),
+			"nonce":      base64.RawURLEncoding.EncodeToString(secret.Nonce),
 		})
 	}
 }
